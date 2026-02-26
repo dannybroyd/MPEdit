@@ -12,6 +12,7 @@ from sklearn.gaussian_process.kernels import RBF
 
 from mpd.models import GaussianDiffusionModel, guide_gradient_steps, CVAEModel
 from mpd.utils.loaders import load_params_from_yaml
+from mpd.utils.path_conversion import path_to_normalized_control_points
 from pb_ompl.pb_ompl import add_box, fit_bspline_to_path
 from scripts.generate_data.generate_trajectories import GenerateDataOMPL
 from mpd.inference.cost_guides import CostGuideManagerParametricTrajectory, NoCostException
@@ -684,3 +685,156 @@ class GenerativeOptimizationPlanner:
         q_trajs_vel_iters = q_traj_d["vel"]
         q_trajs_acc_iters = q_traj_d["acc"]
         return q_trajs_pos_iters, q_trajs_vel_iters, q_trajs_acc_iters
+
+    def plan_trajectory_sdedit(
+        self,
+        q_pos_start,
+        q_pos_goal,
+        EE_pose_goal,
+        input_path,
+        t_noise_level,
+        n_trajectory_samples=None,
+        results_ns: DotMap = None,
+        debug=False,
+        best_trajectory_selection="shortest_path_length",
+        **kwargs,
+    ):
+        """
+        SDEdit-style re-planning: noise an existing path and denoise to produce new paths.
+        
+        Args:
+            q_pos_start: start joint position
+            q_pos_goal: goal joint position
+            EE_pose_goal: end-effector goal pose
+            input_path: (N, state_dim) numpy array or tensor of waypoints (the existing path)
+            t_noise_level: DDIM step index to noise to (e.g., 7 of 15 means moderate noise)
+            n_trajectory_samples: number of output samples
+        """
+        if results_ns is None:
+            results_ns = DotMap(t_generator=0.0, t_guide=0.0)
+
+        if n_trajectory_samples is None:
+            n_trajectory_samples = self.args_inference.n_trajectory_samples
+
+        # Prepare input data and context (same as standard planning)
+        q_pos_start = to_torch(q_pos_start, **self.tensor_args)
+        q_pos_goal = to_torch(q_pos_goal, **self.tensor_args)
+        ee_pose_goal = to_torch(EE_pose_goal, **self.tensor_args)
+
+        results_ns.update(
+            q_pos_start=q_pos_start,
+            q_pos_goal=q_pos_goal,
+            ee_pose_goal=ee_pose_goal,
+        )
+
+        self.planning_task.set_q_pos_start_goal(q_pos_start, q_pos_goal)
+        self.planning_task.set_ee_pose_goal(ee_pose_goal)
+
+        input_data_one_sample = self.dataset.create_data_sample_normalized(
+            q_pos_start, q_pos_goal, ee_pose_goal=ee_pose_goal,
+        )
+        input_data_one_sample = dict_to_device(input_data_one_sample, self.tensor_args["device"])
+        hard_conds = input_data_one_sample["hard_conds"]
+        context_d = self.dataset.build_context(input_data_one_sample)
+
+        # Convert input path to normalized control points
+        x_start = path_to_normalized_control_points(
+            input_path,
+            self.planning_task.parametric_trajectory,
+            self.dataset,
+            tensor_args=self.tensor_args,
+        )
+
+        with TimerCUDA() as t_inference_total:
+            # Run SDEdit inference
+            control_points_normalized_iters = self.model.run_sdedit_inference(
+                x_start=x_start,
+                t_noise_level=t_noise_level,
+                guide=self.cost_guide if self.args_inference.get("planner_alg", "mpd") == "mpd" else None,
+                context_d=context_d,
+                hard_conds=hard_conds,
+                n_samples=n_trajectory_samples,
+                horizon=self.dataset.n_learnable_control_points,
+                return_chain=True,
+                return_chain_x_recon=False,
+                results_ns=results_ns,
+                **self.sample_fn_kwargs,
+            )
+
+        results_ns.t_inference_total = t_inference_total.elapsed
+
+        # Post-process: unnormalize and compute trajectories (same as standard planning)
+        control_points_iters = self.dataset.unnormalize_control_points(control_points_normalized_iters)
+        q_trajs_pos_iters, q_trajs_vel_iters, q_trajs_acc_iters = self.compute_trajectories_from_control_points(
+            q_pos_start, q_pos_goal, control_points_iters
+        )
+
+        # Filter valid trajectories
+        control_points_iter_0 = control_points_iters[-1]
+        q_trajs_pos_iter_0 = q_trajs_pos_iters[-1]
+        q_trajs_vel_iter_0 = q_trajs_vel_iters[-1]
+        q_trajs_acc_iter_0 = q_trajs_acc_iters[-1]
+        q_trajs_iter_0 = torch.cat([q_trajs_pos_iter_0, q_trajs_vel_iter_0, q_trajs_acc_iter_0], dim=-1)
+        _, _, q_trajs_final_valid, valid_idxs, _ = self.planning_task.get_trajs_unvalid_and_valid(
+            q_trajs_iter_0,
+            return_indices=True,
+            filter_joint_limits_vel_acc=True,
+        )
+        if valid_idxs.ndim == 2:
+            valid_idxs = valid_idxs.squeeze(1)
+
+        control_points_valid = control_points_iter_0[valid_idxs]
+        q_trajs_pos_valid = q_trajs_pos_iter_0[valid_idxs]
+        q_trajs_vel_valid = q_trajs_vel_iter_0[valid_idxs]
+        q_trajs_acc_valid = q_trajs_acc_iter_0[valid_idxs]
+
+        # Select best trajectory
+        if valid_idxs.numel() == 0:
+            control_points_best = None
+            q_trajs_pos_best = None
+            q_trajs_vel_best = None
+            q_trajs_acc_best = None
+        else:
+            best_trajectory_selection = self.args_inference.get("best_trajectory_selection", best_trajectory_selection)
+            from torch_robotics.trajectory.metrics import compute_path_length, compute_smoothness
+            if best_trajectory_selection == "shortest_path_length":
+                batch_path_length = compute_path_length(q_trajs_pos_valid, self.planning_task.robot)
+                idx_min_cost = torch.argmin(batch_path_length)
+            elif best_trajectory_selection == "lowest_smoothness_cost":
+                batch_smoothness = compute_smoothness(
+                    q_trajs_pos_valid, self.planning_task.robot, trajs_acc=q_trajs_acc_valid
+                )
+                idx_min_cost = torch.argmin(batch_smoothness)
+            else:
+                batch_path_length = compute_path_length(q_trajs_pos_valid, self.planning_task.robot)
+                idx_min_cost = torch.argmin(batch_path_length)
+
+            control_points_best = control_points_valid[idx_min_cost]
+            q_trajs_pos_best = q_trajs_pos_valid[idx_min_cost]
+            q_trajs_vel_best = q_trajs_vel_valid[idx_min_cost]
+            q_trajs_acc_best = q_trajs_acc_valid[idx_min_cost]
+
+        results_ns.update(
+            control_points_iters=control_points_iters,
+            q_trajs_pos_iters=q_trajs_pos_iters,
+            q_trajs_vel_iters=q_trajs_vel_iters,
+            q_trajs_acc_iters=q_trajs_acc_iters,
+            control_points_recon_iters=None,
+            q_trajs_pos_recon_iters=None,
+            q_trajs_vel_recon_iters=None,
+            q_trajs_acc_recon_iters=None,
+            control_points_iter_0=control_points_iter_0,
+            q_trajs_pos_iter_0=q_trajs_pos_iter_0,
+            q_trajs_vel_iter_0=q_trajs_vel_iter_0,
+            q_trajs_acc_iter_0=q_trajs_acc_iter_0,
+            control_points_valid=control_points_valid,
+            q_trajs_pos_valid=q_trajs_pos_valid,
+            q_trajs_vel_valid=q_trajs_vel_valid,
+            q_trajs_acc_valid=q_trajs_acc_valid,
+            control_points_best=control_points_best,
+            q_trajs_pos_best=q_trajs_pos_best,
+            q_trajs_vel_best=q_trajs_vel_best,
+            q_trajs_acc_best=q_trajs_acc_best,
+            timesteps=self.planning_task.parametric_trajectory.get_timesteps(num=q_trajs_pos_iter_0.shape[1]),
+        )
+        return results_ns

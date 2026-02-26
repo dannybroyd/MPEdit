@@ -433,6 +433,298 @@ class GaussianDiffusionModel(nn.Module, ABC):
         # return the last denoising step
         return trajs_chain_normalized[-1]
 
+    # ------------------------------------------ SDEdit sampling -----------------------------------#
+
+    @torch.no_grad()
+    def p_sdedit_sample_loop(
+        self,
+        x_start,
+        t_noise_level,
+        hard_conds,
+        context_d=None,
+        return_chain=False,
+        return_chain_x_recon=False,
+        sample_fn=ddpm_sample_fn,
+        n_diffusion_steps_without_noise=0,
+        t_start_guide=torch.inf,
+        **sample_kwargs,
+    ):
+        """
+        SDEdit-style DDPM sampling: noise x_start to t_noise_level, then denoise.
+        
+        Args:
+            x_start: clean input (batch, horizon, state_dim) in normalized space
+            t_noise_level: diffusion timestep to noise to (int, 0 to n_diffusion_steps-1)
+        """
+        device = self.betas.device
+        batch_size = x_start.shape[0]
+
+        # Forward diffuse x_start to t_noise_level
+        t = make_timesteps(batch_size, t_noise_level, device)
+        x = self.q_sample(x_start, t)
+        x = apply_hard_conditioning(x, hard_conds)
+
+        chain = [x] if return_chain else None
+        chain_x_recon = [] if return_chain_x_recon else None
+
+        # Reverse denoise from t_noise_level down to 0
+        for i in reversed(range(-n_diffusion_steps_without_noise, t_noise_level + 1)):
+            t_step = make_timesteps(batch_size, i, device)
+            x, x_recon = sample_fn(
+                self, x, hard_conds, context_d, t_step,
+                activate_guide=True if i <= t_start_guide else False,
+                **sample_kwargs
+            )
+            x = apply_hard_conditioning(x, hard_conds)
+
+            if return_chain:
+                chain.append(x)
+            if return_chain_x_recon:
+                chain_x_recon.append(x_recon)
+
+        chains = []
+        if return_chain:
+            chain = torch.stack(chain, dim=1)
+            chains.append(chain)
+        if return_chain_x_recon:
+            chain_x_recon = torch.stack(chain_x_recon, dim=1)
+            chains.append(chain_x_recon)
+
+        return x, *chains
+
+    @torch.no_grad()
+    def ddim_sdedit_sample_loop(
+        self,
+        x_start,
+        t_noise_level,
+        hard_conds,
+        context_d=None,
+        return_chain=False,
+        return_chain_x_recon=False,
+        ddim_eta=0.0,
+        ddim_skip_type="uniform",
+        ddim_sampling_timesteps=None,
+        t_start_guide=torch.inf,
+        scale_grad_by_one_minus_alpha=False,
+        guide=None,
+        guide_lr=0.05,
+        n_guide_steps=1,
+        max_perturb_x=0.1,
+        clip_grad=False,
+        clip_grad_rule="value",
+        max_grad_norm=1.0,
+        max_grad_value=1.0,
+        n_diffusion_steps_without_noise=0,
+        ddim_scale_grad_prior=1.0,
+        compute_costs_with_xrecon=False,
+        results_ns=None,
+        **sample_kwargs,
+    ):
+        """
+        SDEdit-style DDIM sampling: noise x_start to t_noise_level, then denoise.
+        
+        Args:
+            x_start: clean input (batch, horizon, state_dim) in normalized space
+            t_noise_level: the DDIM step index to start denoising from (e.g., 7 of 15).
+                           This is mapped to actual diffusion timestep via the time_pairs schedule.
+        """
+        context_emb = None
+        if context_d is not None:
+            context_emb = self.context_model(**context_d)
+
+        device = self.betas.device
+        batch_size = x_start.shape[0]
+        total_timesteps = self.n_diffusion_steps
+        sampling_timesteps = ddim_sampling_timesteps if ddim_sampling_timesteps is not None else total_timesteps
+        assert sampling_timesteps <= total_timesteps
+
+        # Build the full time pairs schedule
+        time_pairs = ddim_create_time_pairs(
+            total_timesteps, sampling_timesteps, ddim_skip_type, n_diffusion_steps_without_noise
+        )
+
+        # Determine the actual diffusion timestep for t_noise_level (DDIM step index)
+        # time_pairs are ordered [(T-1, T-2), ..., (1, 0), (0, -1)]
+        # t_noise_level=0 means start from the noisiest step, t_noise_level=sampling_timesteps-1 means barely noised
+        # We want: if user says "start from DDIM step k", we skip the first k time pairs
+        # and noise to the diffusion timestep at position k in the schedule
+        sdedit_start_idx = t_noise_level
+        time_pairs_sdedit = time_pairs[sdedit_start_idx:]
+
+        # The diffusion timestep we noise to is the _time of the first remaining pair
+        if len(time_pairs_sdedit) > 0:
+            actual_noise_timestep = time_pairs_sdedit[0][0]
+        else:
+            actual_noise_timestep = 0
+
+        # Forward diffuse x_start to the actual noise timestep
+        t_forward = make_timesteps(batch_size, max(actual_noise_timestep, 0), device)
+        x = self.q_sample(x_start, t_forward)
+        x = apply_hard_conditioning(x, hard_conds)
+
+        clip_grad_fn = lambda x: x
+        if clip_grad and clip_grad_rule == "norm":
+            clip_grad_fn = partial(clip_grad_by_norm, max_grad_norm=max_grad_norm)
+        elif clip_grad and clip_grad_rule == "value":
+            clip_grad_fn = partial(clip_grad_by_value, max_grad_value=max_grad_value)
+
+        chain = [x] if return_chain else None
+        chain_x_recon = [x] if return_chain_x_recon else None
+
+        # Denoise from t_noise_level using only the remaining time pairs
+        for k_step, (_time, _time_next) in enumerate(time_pairs_sdedit):
+            if _time == _time_next:
+                continue
+            if _time_next < 0:
+                _time = 1
+                _time_next = 0
+
+            t = make_timesteps(batch_size, _time, device)
+            t_next = make_timesteps(batch_size, _time_next, device)
+
+            alpha = extract(self.alphas_cumprod, t, x.shape)
+            alpha_next = extract(self.alphas_cumprod, t_next, x.shape)
+            sigma = ddim_eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma**2).sqrt()
+
+            with TimerCUDA() as t_generator:
+                model_out = self.model(x, t, context_emb)
+
+            if results_ns is not None:
+                results_ns.t_generator += t_generator.elapsed
+
+            grad_prior = model_out
+
+            def update_x(_x, _grad_prior):
+                _x_recon = self.predict_start_from_noise(_x, t=t, noise=_grad_prior)
+                if self.clip_denoised:
+                    _x_recon.clamp_(-1.0, 1.0)
+                else:
+                    assert RuntimeError()
+                _pred_noise = self.predict_noise_from_start(_x, t=t, x0=_grad_prior)
+                _x = _x_recon * alpha_next.sqrt() + c * _pred_noise
+                _x = apply_hard_conditioning(_x, hard_conds)
+                return _x, _x_recon
+
+            # The global step index for guidance activation
+            global_k_step = sdedit_start_idx + k_step
+
+            if guide is not None and (ddim_sampling_timesteps - global_k_step) <= t_start_guide:
+                with TimerCUDA() as t_guide:
+                    x_start_opt = x.clone()
+                    for k_gd in range(n_guide_steps):
+                        grad_prior_weighted = grad_prior * ddim_scale_grad_prior
+                        grad_guide = guide(x, context_d=context_d)
+                        grad_guide_clipped = clip_grad_fn(grad_guide)
+                        grad_guide_clipped_weighted = guide_lr * grad_guide_clipped
+
+                        if scale_grad_by_one_minus_alpha:
+                            grad_total = grad_prior_weighted - (1 - alpha).sqrt() * grad_guide_clipped_weighted
+                        else:
+                            grad_total = grad_prior_weighted - grad_guide_clipped_weighted
+
+                        x_tmp, x_recon = update_x(x, grad_total)
+                        x_delta = x_tmp - x_start_opt
+                        x_delta_clipped = torch.clip(x_delta, -max_perturb_x, max_perturb_x)
+                        x = x_start_opt + x_delta_clipped
+
+                    if results_ns is not None:
+                        results_ns.t_guide += t_guide.elapsed
+            else:
+                x, x_recon = update_x(x, grad_prior)
+
+            if _time_next >= 1:
+                noise = torch.randn_like(x) if ddim_eta != 0.0 else 0.0
+                x = x + sigma * noise
+                x = apply_hard_conditioning(x, hard_conds)
+
+            if return_chain:
+                chain.append(x.clone())
+            if return_chain_x_recon:
+                chain_x_recon.append(x_recon.clone())
+
+        chains = []
+        if return_chain:
+            chain = torch.stack(chain, dim=1)
+            chains.append(chain)
+        if return_chain_x_recon:
+            chain_x_recon = torch.stack(chain_x_recon, dim=1)
+            chains.append(chain_x_recon)
+
+        return x, *chains
+
+    @torch.no_grad()
+    def conditional_sample_sdedit(self, x_start, t_noise_level, hard_conds, method="ddpm", **sample_kwargs):
+        """
+        SDEdit-style conditional sampling from an input path.
+        
+        Args:
+            x_start: (batch, horizon, state_dim) normalized control points
+            t_noise_level: noise level (DDIM step index for ddim, diffusion step for ddpm)
+        """
+        if method == "ddim":
+            assert self.predict_epsilon, "ddim only works with predict_epsilon=True"
+            return self.ddim_sdedit_sample_loop(x_start, t_noise_level, hard_conds, **sample_kwargs)
+        elif method == "ddpm":
+            return self.p_sdedit_sample_loop(
+                x_start, t_noise_level, hard_conds, sample_fn=ddpm_sample_fn, **sample_kwargs
+            )
+        else:
+            raise NotImplementedError
+
+    @torch.no_grad()
+    def run_sdedit_inference(
+        self,
+        x_start,
+        t_noise_level,
+        context_d=None,
+        hard_conds=None,
+        n_samples=1,
+        return_chain=False,
+        return_chain_x_recon=False,
+        **diffusion_kwargs,
+    ):
+        """
+        SDEdit-style inference: noise x_start and denoise from intermediate step.
+        
+        Args:
+            x_start: (horizon, state_dim) single normalized control point trajectory
+            t_noise_level: noise level to start denoising from
+            n_samples: number of output samples (x_start is replicated)
+        """
+        # Repeat x_start for n_samples
+        x_start_batch = einops.repeat(x_start, "... -> b ...", b=n_samples)
+
+        # Repeat hard conditions and contexts for n_samples
+        for k, v in hard_conds.items():
+            hard_conds[k] = einops.repeat(v, "... -> b ...", b=n_samples)
+
+        for k, v in context_d.items():
+            context_d[k] = einops.repeat(v, "... -> b ...", b=n_samples)
+
+        # Sample via SDEdit
+        samples, chain, chain_x_recon = self.conditional_sample_sdedit(
+            x_start_batch,
+            t_noise_level,
+            hard_conds,
+            context_d=context_d,
+            return_chain=True,
+            return_chain_x_recon=True,
+            **diffusion_kwargs,
+        )
+
+        # Rearrange chains: [batch, diffsteps, ...] -> [diffsteps, batch, ...]
+        trajs_chain_normalized = einops.rearrange(chain, "b diffsteps ... -> diffsteps b ...")
+        trajs_x_recon_chain_normalized = einops.rearrange(chain_x_recon, "b diffsteps ... -> diffsteps b ...")
+
+        if return_chain and return_chain_x_recon:
+            return trajs_chain_normalized, trajs_x_recon_chain_normalized
+        elif return_chain:
+            return trajs_chain_normalized
+
+        # Return the last denoising step
+        return trajs_chain_normalized[-1]
+
     # ------------------------------------------ training ------------------------------------------#
 
     def q_sample(self, x_start, t, noise=None):

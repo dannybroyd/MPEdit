@@ -48,14 +48,14 @@ def experiment(
     selection_start_goal: str = "validation",  # training, validation/test
     ########################################################################
     # number of start and goal states to evaluate
-    n_start_goal_states: int = 1,
+    n_start_goal_states: int = 5,
     ########################################################################
     save_results_single_plan_low_mem: bool = False,
     ########################################################################
     # Visualization options
-    render_joint_space_time_iters: bool = True,
+    render_joint_space_time_iters: bool = False,
     render_joint_space_env_iters: bool = False,
-    render_env_robot_opt_iters: bool = False,
+    render_env_robot_opt_iters: bool = True,
     render_env_robot_trajectories: bool = False,
     render_pybullet: bool = False,
     draw_collision_spheres: bool = False,
