@@ -165,9 +165,120 @@ To sweep multiple noise levels:
 python inference_sdedit.py --t_noise_levels "3,5,7,9,11"
 ```
 
+**Interactive mode** — GUI editors for obstacle editing and path sketching:
+```bash
+# Re-plan: click to add/remove obstacles, then auto-regenerate the path
+python inference_sdedit_interactive.py --sdedit_mode replan
+
+# Sketch: draw a freehand path with the mouse, then denoise it
+python inference_sdedit_interactive.py --sdedit_mode sketch
+```
+
 ### New Files Reference
 
-#### `scripts/inference/inference_sdedit.py` — Main SDEdit Inference Script
+#### `scripts/inference/inference_sdedit_interactive.py` — Interactive SDEdit with GUI Editors
+
+Launches a matplotlib GUI window before running the SDEdit pipeline. In **replan** mode, opens the Obstacle Editor; in **sketch** mode, opens the Path Sketcher.
+
+**Key arguments**:
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `sdedit_mode` | str | `"replan"` | `"replan"` (obstacle editor → regenerate) or `"sketch"` (path sketcher → denoise) |
+| `t_noise_level` | int | `7` | Single DDIM step index for the noise level |
+| `n_start_goal_states` | int | `1` | Number of start/goal pairs (GUI opens once per pair) |
+| `render_before_after` | bool | `True` | Generate 3-panel Before/Edit/After figure |
+| `render_denoising_video` | bool | `True` | Generate denoising animation video |
+
+**Workflow — Replan mode**:
+1. Environment and model load automatically
+2. RRTConnect generates a reference path (shown in blue dashes)
+3. **Obstacle Editor GUI opens** → click to add/remove obstacles → click "Done"
+4. SDEdit runs: noise the old path → denoise with updated cost guide
+5. Results saved to `logs_sdedit_interactive/`
+
+**Workflow — Sketch mode**:
+1. Environment and model load automatically
+2. **Path Sketcher GUI opens** → draw a path from start to goal → click "Done"
+3. SDEdit runs: noise the sketch → denoise to make it collision-free
+4. Results saved to `logs_sdedit_interactive/`
+
+---
+
+#### `mpd/interactive/obstacle_editor.py` — Interactive Obstacle Editor
+
+Matplotlib-based GUI for adding and removing obstacles on the 2D environment map.
+
+**Controls**:
+
+| Action | Effect |
+|---|---|
+| **Left-click** on map | Add obstacle (sphere or box) at click position |
+| **Right-click** on map | Remove the nearest obstacle (extra first, then fixed) |
+| **Size slider** | Adjust radius (sphere) or half-extent (box) before placing |
+| **Radio buttons** | Toggle between "sphere" and "box" obstacle types |
+| **U key** | Undo last action |
+| **Clear All** button | Remove all modifications |
+| **Done ✓** / Enter | Accept modifications and close |
+
+**Programmatic usage**:
+```python
+from mpd.interactive.obstacle_editor import ObstacleEditor
+
+editor = ObstacleEditor(
+    env=planning_task.env,
+    tensor_args=tensor_args,
+    existing_path=rrt_path,           # optional reference path (shown as blue dashes)
+    q_pos_start=q_pos_start,          # optional start marker
+    q_pos_goal=q_pos_goal,            # optional goal marker
+    initial_radius=0.08,              # default sphere radius
+)
+modifications = editor.run()  # blocks until Done
+# modifications = [{"type": "add_sphere", "center": [0.2, 0.3], "radius": 0.08}, ...]
+```
+
+**Returns**: list of modification dicts. Each dict has `"type"` (`"add_sphere"`, `"add_box"`, `"remove_sphere"`) plus relevant parameters (`"center"`, `"radius"`, `"sizes"`, `"index"`).
+
+---
+
+#### `mpd/interactive/path_sketcher.py` — Interactive Path Sketcher
+
+Matplotlib-based GUI for drawing freehand paths on the 2D environment map.
+
+**Controls**:
+
+| Action | Effect |
+|---|---|
+| **Click + drag** | Draw a freehand path |
+| **Release mouse** | Auto-smooth and resample to N waypoints |
+| **Right-click** | Clear the sketch and start over |
+| **Clear Sketch** button | Clear the sketch |
+| **Done ✓** / Enter | Accept the path and close |
+
+The sketched path is automatically:
+- Snapped to start/goal endpoints
+- Smoothed with a B-spline fit
+- Resampled to `n_waypoints` evenly-spaced points
+
+**Programmatic usage**:
+```python
+from mpd.interactive.path_sketcher import PathSketcher
+
+sketcher = PathSketcher(
+    env=planning_task.env,
+    q_pos_start=q_pos_start,
+    q_pos_goal=q_pos_goal,
+    n_waypoints=64,                   # must match model's num_T_pts
+)
+path = sketcher.run()  # blocks until Done
+# path: (64, 2) numpy array, or None if cancelled
+```
+
+**Returns**: `(n_waypoints, 2)` numpy array of the smoothed sketch, or `None` if no path was drawn.
+
+---
+
+#### `scripts/inference/inference_sdedit.py` — Main SDEdit Inference Script (batch mode)
 
 The primary entry point for running SDEdit experiments. Supports both re-planning and sketch modes.
 
