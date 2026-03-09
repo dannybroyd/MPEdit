@@ -1,23 +1,3 @@
-# Motion Planning Diffusion: Learning and Adapting Robot Motion Planning with Diffusion Models
-
-[![paper](https://img.shields.io/badge/Paper-%F0%9F%93%96-lightgray)](https://ieeexplore.ieee.org/abstract/document/11097366)
-[![arXiv](https://img.shields.io/badge/arXiv-2502.08378-brown)](https://arxiv.org/abs/2412.19948)
-[![](https://img.shields.io/badge/Website-%F0%9F%9A%80-yellow)](https://sites.google.com/view/motionplanningdiffusion/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)]()
-
-
-<div style="display: flex; text-align:center; justify-content: center">
-    <img src="figures/EnvSimple2D-RobotPointMass2D-joint_joint-one-RRTConnect.gif" alt="Image 1" width="400" style="display: inline-block;">
-    <img src="figures/EnvWarehouse-RobotPanda-config_file_v01-joint_joint-one-RRTConnect.gif" alt="Image 2" width="400" style="display: inline-block;">
-</div>
-
-This repository implements Motion Planning Diffusion (**MPD**) - a method for learning and planning robot motions with diffusion models.
-
-An older version of this project is deprecated, but still available at [https://github.com/jacarvalho/mpd-public](https://github.com/jacarvalho/mpd-public).
-
-Please contact me if you have any questions -- [joao@robot-learning.de](mailto:joao@robot-learning.de)
-
----
 # Installation
 
 Pre-requisites:
@@ -59,87 +39,6 @@ Download https://drive.google.com/file/d/1KG5ejn0g0KkDuUK6tPUqfmRYCNoKzK4K/view?
 tar -xvf data_public.tar.gz
 ln -s data_public/data_trajectories data_trajectories
 ln -s data_public/data_trained_models data_trained_models
-```
-
-
----
-## Inference with pre-trained models
-
-The configuration files under [scripts/inference/cfgs](scripts/inference/cfgs) contain the hyperparameters for inference.\
-Inside the file `scripts/inference/inference.py` you can change the `cfg_inference_path` parameter to try models trained for different environments.
-
-```bash
-cd scripts/inference
-python inference.py
-```
-
-
----
-# Training the prior models (from scratch)
-
-
-## Data generation
-
-Generating data takes a long time, so we recommend [downloading the dataset](#download-the-datasets-and-pre-trained-models).
-But if anyway you want to generate your own data, you can do it with the scripts in the `scripts/generate_data` folder.
-
-Go to the `scripts/generate_data` folder.
-
-The base script is
-```bash
-python generate_trajectories.py
-```
-
-To generate multiple datasets in parallel, adapt the `launch_generate_trajectories.py` script.
-```bash
-python launch_generate_trajectories.py
-```
-
-After generating the data, run the post-processing file to combine all data into a hdf5 file.
-Then you can double the dataset by flipping the trajectory paths.
-```bash
-python post_process_trajectories.py --help
-python flip_solution_paths.py  (change the PATH_TO_DATASETS variable)
-```
-
-To visualize the generated data, use the `visualize_trajectories.py` script.
-```bash
-python visualize_trajectories.py
-```
-
----
-## Training the models
-
-The training scripts are in the `scripts/train` folder.
-
-The base script is
-```bash
-cd scripts/train
-python train.py
-```
-
-To train multiple models in parallel, use the `launch_train_*` files.
-
-
----
-## Citation
-
-If you use our work or code base, please cite our articles:
-```latex
-@article{carvalho2025motion,
-  title={Motion planning diffusion: Learning and adapting robot motion planning with diffusion models},
-  author={Carvalho, Jo{\~a}o and Le, An T and Kicki, Piotr and Koert, Dorothea and Peters, Jan},
-  journal={IEEE Transactions on Robotics},
-  year={2025},
-  publisher={IEEE}
-}
-
-@inproceedings{carvalho2023motion,
-  title={Motion planning diffusion: Learning and planning of robot motions with diffusion models},
-  author={Carvalho, Jo{\~a}o and Le, An T and Baierl, Mark and Koert, Dorothea and Peters, Jan},
-  booktitle={IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
-  year={2023}
-}
 ```
 
 
@@ -349,7 +248,86 @@ sdedit:
 
 ---
 
-#### `mpd/utils/path_conversion.py` — Path to Control Points Conversion
+#### `scripts/inference/cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml` — 3D SDEdit Configuration
+
+YAML configuration for running SDEdit on the **EnvSpheres3D-RobotPanda** environment (7-DOF Panda arm navigating among spherical obstacles in 3D space).
+
+> **Note:** Only **replan** mode is supported for 3D/high-DOF environments. Sketch mode requires drawing in joint space, which is not practical for 7-DOF robots.
+
+**SDEdit section** (same structure as 2D, but with 3D coordinates):
+```yaml
+sdedit:
+  t_noise_level: 7
+  mode: 'replan'
+  obstacle_modification:
+    type: 'add_sphere'
+    center: [0.0, 0.0, 0.5]   # 3D center
+    radius: 0.15
+```
+
+**Running 3D SDEdit** (batch mode):
+```bash
+cd scripts/inference
+
+# Batch replan — uses obstacle from config
+python inference_sdedit.py \
+  --cfg_inference_path ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml \
+  --sdedit_mode replan
+```
+
+**Running 3D SDEdit** (interactive mode):
+```bash
+# Interactive replan — opens 3D obstacle editor
+python inference_sdedit_interactive.py \
+  --cfg_inference_path ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml \
+  --sdedit_mode replan
+```
+
+---
+
+#### `mpd/interactive/obstacle_editor_3d.py` — Interactive 3D Obstacle Editor
+
+A matplotlib-based 3D interactive editor for placing/removing spherical obstacles in 3D environments. Automatically used when the environment has `dim >= 3`.
+
+**Controls**:
+
+| Input | Action |
+|---|---|
+| **Left-click** on 3D plot | Add a sphere at the clicked (X, Y) position and the current Z-slider value |
+| **Right-click** | Remove the nearest added obstacle (projected distance) |
+| **Z pos slider** | Set the Z coordinate for the next placed obstacle |
+| **Radius slider** | Set the radius for the next placed obstacle |
+| **U key** | Undo the last add/remove |
+| **Clear All** button | Remove all added obstacles |
+| **Done ✓** button / **Enter** | Accept modifications and close |
+
+A translucent horizontal "ghost plane" is rendered at the current Z level to help visualize placement depth.
+
+**Usage**:
+```python
+from mpd.interactive.obstacle_editor_3d import ObstacleEditor3D
+
+editor = ObstacleEditor3D(
+    env=planning_task.env,
+    tensor_args=tensor_args,
+    robot=planning_task.robot,
+)
+modifications = editor.run()   # blocks until Done
+# modifications: [{"type": "add_sphere", "center": [x, y, z], "radius": r}, ...]
+```
+
+**Returns**: list of modification dicts (same format as the 2D editor), or empty list if no changes.
+
+---
+
+#### 3D vs 2D — Automatic Environment Detection
+
+The interactive inference script (`inference_sdedit_interactive.py`) automatically detects the environment dimensionality via `planning_task.env.dim`:
+
+- **2D** (`dim == 2`): Uses the standard `ObstacleEditor` and `PathSketcher`
+- **3D** (`dim >= 3`): Uses `ObstacleEditor3D` for replan mode; sketch mode is disabled with a warning
+
+The plotting functions in `sdedit_plots.py` also auto-detect dimensionality and render 3D axes (with `projection="3d"`) when appropriate.
 
 Converts a raw waypoint path into normalized B-spline control points that the diffusion model can process.
 
@@ -415,7 +393,7 @@ planner.cost_guide = CostGuideManagerParametricTrajectory(planning_task, dataset
 
 #### `mpd/plotting/sdedit_plots.py` — SDEdit Visualization
 
-Plotting utilities for visualizing SDEdit results.
+Plotting utilities for visualizing SDEdit results. **All functions auto-detect 2D vs 3D** environments and render appropriately (flat 2D axes or `projection="3d"` axes with wireframe sphere annotations).
 
 **Functions**:
 
@@ -496,7 +474,84 @@ The `GenerativeOptimizationPlanner` in `mpd/inference/inference.py` gained:
 
 
 ---
-## Credits
+## Inference with pre-trained models
 
-Parts of this work and software were taken and/or inspired from:
-- [https://github.com/jannerm/diffuser](https://github.com/jannerm/diffuser)
+The configuration files under [scripts/inference/cfgs](scripts/inference/cfgs) contain the hyperparameters for inference.\
+Inside the file `scripts/inference/inference.py` you can change the `cfg_inference_path` parameter to try models trained for different environments.
+
+```bash
+cd scripts/inference
+python inference.py
+```
+
+
+---
+# Training the prior models (from scratch)
+
+
+## Data generation
+
+Generating data takes a long time, so we recommend [downloading the dataset](#download-the-datasets-and-pre-trained-models).
+But if anyway you want to generate your own data, you can do it with the scripts in the `scripts/generate_data` folder.
+
+Go to the `scripts/generate_data` folder.
+
+The base script is
+```bash
+python generate_trajectories.py
+```
+
+To generate multiple datasets in parallel, adapt the `launch_generate_trajectories.py` script.
+```bash
+python launch_generate_trajectories.py
+```
+
+After generating the data, run the post-processing file to combine all data into a hdf5 file.
+Then you can double the dataset by flipping the trajectory paths.
+```bash
+python post_process_trajectories.py --help
+python flip_solution_paths.py  (change the PATH_TO_DATASETS variable)
+```
+
+To visualize the generated data, use the `visualize_trajectories.py` script.
+```bash
+python visualize_trajectories.py
+```
+
+---
+## Training the models
+
+The training scripts are in the `scripts/train` folder.
+
+The base script is
+```bash
+cd scripts/train
+python train.py
+```
+
+To train multiple models in parallel, use the `launch_train_*` files.
+
+
+---
+## Citation
+
+If you use our work or code base, please cite our articles:
+```latex
+@article{carvalho2025motion,
+  title={Motion planning diffusion: Learning and adapting robot motion planning with diffusion models},
+  author={Carvalho, Jo{\~a}o and Le, An T and Kicki, Piotr and Koert, Dorothea and Peters, Jan},
+  journal={IEEE Transactions on Robotics},
+  year={2025},
+  publisher={IEEE}
+}
+
+@inproceedings{carvalho2023motion,
+  title={Motion planning diffusion: Learning and planning of robot motions with diffusion models},
+  author={Carvalho, Jo{\~a}o and Le, An T and Baierl, Mark and Koert, Dorothea and Peters, Jan},
+  booktitle={IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
+  year={2023}
+}
+```
+
+
+---

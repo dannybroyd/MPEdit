@@ -2,15 +2,21 @@
 Interactive SDEdit inference with GUI editors.
 
 Launches an obstacle editor or path sketcher before running the SDEdit pipeline.
+Automatically detects 2D vs 3D environments and uses the appropriate editor.
 
 Usage:
   cd scripts/inference
 
-  # Interactive re-planning (edit obstacles, then regenerate)
+  # 2D Interactive re-planning (edit obstacles, then regenerate)
   python inference_sdedit_interactive.py --sdedit_mode replan
 
-  # Interactive sketching (draw a path, then denoise it)
+  # 2D Interactive sketching (draw a path, then denoise it)
   python inference_sdedit_interactive.py --sdedit_mode sketch
+
+  # 3D Interactive re-planning (add/remove spheres in 3D view)
+  python inference_sdedit_interactive.py \\
+    --cfg_inference_path ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml \\
+    --sdedit_mode replan
 """
 
 from mpd.utils.patches import numpy_monkey_patch
@@ -39,6 +45,7 @@ from mpd.plotting.sdedit_plots import (
     plot_sdedit_before_after, animate_sdedit_denoising,
 )
 from mpd.interactive.obstacle_editor import ObstacleEditor
+from mpd.interactive.obstacle_editor_3d import ObstacleEditor3D
 from mpd.interactive.path_sketcher import PathSketcher
 from mpd.utils.loaders import get_planning_task_and_dataset, load_params_from_yaml, save_to_yaml
 from mpd.utils.obstacle_editing import add_sphere_obstacle, add_box_obstacle, remove_fixed_obstacle_by_index
@@ -181,14 +188,27 @@ def experiment(
                 print("Cannot replan without a reference path. Skipping.")
                 continue
 
-            print("\n>>> Opening Obstacle Editor — modify the obstacle map, then click Done <<<")
-            editor = ObstacleEditor(
-                env=planning_task.env,
-                tensor_args=tensor_args,
-                existing_path=rrt_path,
-                q_pos_start=q_pos_start,
-                q_pos_goal=q_pos_goal,
-            )
+            env_dim = planning_task.env.dim
+
+            if env_dim >= 3:
+                print("\n>>> Opening 3D Obstacle Editor — use sliders to place spheres, then click Done <<<")
+                editor = ObstacleEditor3D(
+                    env=planning_task.env,
+                    tensor_args=tensor_args,
+                    robot=planning_task.robot,
+                    existing_path=rrt_path,
+                    q_pos_start=q_pos_start,
+                    q_pos_goal=q_pos_goal,
+                )
+            else:
+                print("\n>>> Opening Obstacle Editor — modify the obstacle map, then click Done <<<")
+                editor = ObstacleEditor(
+                    env=planning_task.env,
+                    tensor_args=tensor_args,
+                    existing_path=rrt_path,
+                    q_pos_start=q_pos_start,
+                    q_pos_goal=q_pos_goal,
+                )
             modifications = editor.run()
 
             if not modifications:
@@ -216,6 +236,13 @@ def experiment(
         ########################################################################################################
         # MODE: SKETCH — launch path sketcher, then SDEdit from the sketch
         elif sdedit_mode == "sketch":
+            env_dim = planning_task.env.dim
+            if env_dim >= 3:
+                print("\n⚠  Sketch mode is not supported for 3D/high-DOF environments.")
+                print("   The path sketcher works in task space (2D), but the Panda robot")
+                print("   plans in 7D joint space. Use 'replan' mode instead for 3D.")
+                continue
+
             print("\n>>> Opening Path Sketcher — draw a path from start to goal, then click Done <<<")
             sketcher = PathSketcher(
                 env=planning_task.env,
@@ -300,7 +327,7 @@ def experiment(
             q_pos_start, q_pos_goal,
             input_path,
             to_numpy(results_single.q_trajs_pos_iter_0) if results_single.q_trajs_pos_iter_0 is not None
-                else np.zeros((0, input_path.shape[0], 2)),
+                else np.zeros((0, input_path.shape[0], input_path.shape[1])),
             best_path=to_numpy(results_single.q_trajs_pos_best) if results_single.q_trajs_pos_best is not None
                 else None,
             title=f"Interactive SDEdit ({sdedit_mode}, t_noise={t_noise_level})",

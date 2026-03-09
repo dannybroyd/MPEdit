@@ -298,7 +298,7 @@ def experiment(
                 planning_task.env,
                 q_pos_start, q_pos_goal,
                 input_path,
-                to_numpy(regen_paths) if regen_paths is not None else np.zeros((0, input_path.shape[0], 2)),
+                to_numpy(regen_paths) if regen_paths is not None else np.zeros((0, input_path.shape[0], input_path.shape[1])),
                 best_path=to_numpy(best_path) if best_path is not None else None,
                 title=f"SDEdit (t_noise={noise_levels[0]}, mode={sdedit_mode})",
                 obstacle_modification=obstacle_mod if sdedit_mode == "replan" else None,
@@ -309,7 +309,7 @@ def experiment(
             regen_dict = {}
             for t_noise, (regen_paths, best_path) in results_by_noise_level.items():
                 regen_dict[t_noise] = (
-                    to_numpy(regen_paths) if regen_paths is not None else np.zeros((0, input_path.shape[0], 2)),
+                    to_numpy(regen_paths) if regen_paths is not None else np.zeros((0, input_path.shape[0], input_path.shape[1])),
                     to_numpy(best_path) if best_path is not None else None,
                 )
             fig, axes_cmp = plot_noise_level_comparison(
