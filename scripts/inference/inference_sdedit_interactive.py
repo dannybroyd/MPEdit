@@ -333,8 +333,28 @@ def experiment(
             title=f"Interactive SDEdit ({sdedit_mode}, t_noise={t_noise_level})",
             obstacle_modification=obstacle_mod if sdedit_mode == "replan" else None,
             save_path=os.path.join(results_dir, f"interactive_result-{idx_sg:03d}.png"),
+            robot=planning_task.robot,
+            tensor_args=tensor_args,
         )
         plt.close(fig)
+
+        # Interactive 3D result viewer — let user rotate and inspect
+        if planning_task.env.dim >= 3:
+            print("\n>>> Opening interactive 3D result viewer (close window to continue) <<<")
+            fig_3d, ax_3d = plot_sdedit_results(
+                planning_task.env,
+                q_pos_start, q_pos_goal,
+                input_path,
+                to_numpy(results_single.q_trajs_pos_iter_0) if results_single.q_trajs_pos_iter_0 is not None
+                    else np.zeros((0, input_path.shape[0], input_path.shape[1])),
+                best_path=to_numpy(results_single.q_trajs_pos_best) if results_single.q_trajs_pos_best is not None
+                    else None,
+                title=f"Interactive Result — {sdedit_mode}, t_noise={t_noise_level} (rotate to inspect)",
+                obstacle_modification=obstacle_mod if sdedit_mode == "replan" else None,
+                robot=planning_task.robot,
+                tensor_args=tensor_args,
+            )
+            plt.show(block=True)
 
         gc.collect()
         torch.cuda.empty_cache()

@@ -56,6 +56,7 @@ def plot_sdedit_before_after(
     env = planning_task.env
     robot = planning_task.robot
     dim = env.dim
+    ta = getattr(planning_task, "tensor_args", {"device": "cpu", "dtype": torch.float32})
 
     if dim >= 3:
         fig = plt.figure(figsize=figsize)
@@ -74,45 +75,48 @@ def plot_sdedit_before_after(
     # ── Panel 1: BEFORE ──────────────────────────────────────────────────
     ax_before.set_title("Before (original map + path)", fontsize=13)
     _render_env_on_ax(ax_before, env, dim, draw_extra=False)
-    _draw_path(ax_before, input_np, color="blue", linewidth=2.5, label="Valid Path", zorder=5)
-    _draw_start_goal(ax_before, start_np, goal_np, robot, dim)
+    _draw_path(ax_before, input_np, robot=robot, env=env, tensor_args=ta,
+               color="blue", linewidth=2.5, label="Valid Path", zorder=5)
+    _draw_start_goal(ax_before, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
     ax_before.legend(loc="upper left", fontsize=9)
 
     # ── Panel 2: OBSTACLE EDIT ───────────────────────────────────────────
     ax_edit.set_title("Obstacle map after edit", fontsize=13)
     _render_env_on_ax(ax_edit, env, dim, draw_extra=True)
-    _draw_path(ax_edit, input_np, color="blue", linewidth=1.5, alpha=0.4, linestyle="--",
+    _draw_path(ax_edit, input_np, robot=robot, env=env, tensor_args=ta,
+               color="blue", linewidth=1.5, alpha=0.4, linestyle="--",
                label="Old Path", zorder=4)
-    _draw_start_goal(ax_edit, start_np, goal_np, robot, dim)
+    _draw_start_goal(ax_edit, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
     _annotate_obstacle_mod(ax_edit, obstacle_modification)
     ax_edit.legend(loc="upper left", fontsize=9)
 
     # ── Panel 3: AFTER ───────────────────────────────────────────────────
     ax_after.set_title("After SDEdit (regenerated paths)", fontsize=13)
     _render_env_on_ax(ax_after, env, dim, draw_extra=True)
-    _draw_path(ax_after, input_np, color="blue", linewidth=1.5, alpha=0.35, linestyle="--",
+    _draw_path(ax_after, input_np, robot=robot, env=env, tensor_args=ta,
+               color="blue", linewidth=1.5, alpha=0.35, linestyle="--",
                label="Old Path", zorder=4)
 
     if all_regen_paths is not None:
         regen_np = to_numpy(all_regen_paths) if torch.is_tensor(all_regen_paths) else np.asarray(all_regen_paths)
-        for i in range(min(regen_np.shape[0], 60)):
-            if _is_3d_ax(ax_after) and regen_np.shape[-1] >= 3:
-                ax_after.plot(regen_np[i, :, 0], regen_np[i, :, 1], regen_np[i, :, 2],
+        if _needs_fk(regen_np, env) and _is_3d_ax(ax_after):
+            regen_ts = _batch_paths_to_taskspace(regen_np, robot, ta)
+        else:
+            regen_ts = regen_np
+        for i in range(min(regen_ts.shape[0], 60)):
+            if _is_3d_ax(ax_after) and regen_ts.shape[-1] >= 3:
+                ax_after.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], regen_ts[i, :, 2],
                               color="orange", alpha=0.15, linewidth=1.0, zorder=3)
             else:
-                ax_after.plot(regen_np[i, :, 0], regen_np[i, :, 1],
+                ax_after.plot(regen_ts[i, :, 0], regen_ts[i, :, 1],
                               color="orange", alpha=0.15, linewidth=1.0, zorder=3)
 
     if best_regen_path is not None:
         best_np = to_numpy(best_regen_path) if torch.is_tensor(best_regen_path) else np.asarray(best_regen_path)
-        if _is_3d_ax(ax_after) and best_np.shape[-1] >= 3:
-            ax_after.plot(best_np[:, 0], best_np[:, 1], best_np[:, 2],
-                          color="green", linewidth=2.5, label="Best Regenerated", zorder=6)
-        else:
-            ax_after.plot(best_np[:, 0], best_np[:, 1],
-                          color="green", linewidth=2.5, label="Best Regenerated", zorder=6)
+        _draw_path(ax_after, best_np, robot=robot, env=env, tensor_args=ta,
+                   color="green", linewidth=2.5, label="Best Regenerated", zorder=6)
 
-    _draw_start_goal(ax_after, start_np, goal_np, robot, dim)
+    _draw_start_goal(ax_after, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
     ax_after.legend(loc="upper left", fontsize=9)
 
     plt.suptitle(title, fontsize=15, y=1.01)
@@ -156,10 +160,13 @@ def animate_sdedit_denoising(
         anim_time: video duration in seconds
     """
     env = planning_task.env
+    robot = planning_task.robot
     dim = env.dim
+    ta = getattr(planning_task, "tensor_args", {"device": "cpu", "dtype": torch.float32})
 
     assert trajs_pos_iters.ndim == 4, f"Expected (S, B, H, D), got {trajs_pos_iters.shape}"
     S, B, H, D = trajs_pos_iters.shape
+    high_dof = D > dim
 
     if n_frames is None:
         n_frames = max(2, S)
@@ -171,6 +178,16 @@ def animate_sdedit_denoising(
     start_np = to_numpy(q_pos_start)
     goal_np  = to_numpy(q_pos_goal)
 
+    # Pre-compute task-space conversions for high-DOF robots
+    if high_dof and dim >= 3:
+        input_ts = _path_to_taskspace(input_np, robot, ta)
+        start_ts = _point_to_taskspace(start_np, robot, ta)
+        goal_ts  = _point_to_taskspace(goal_np, robot, ta)
+    else:
+        input_ts = input_np
+        start_ts = start_np
+        goal_ts  = goal_np
+
     fig, ax = create_fig_and_axes(dim=dim)
 
     def animate_fn(i, ax):
@@ -180,55 +197,46 @@ def animate_sdedit_denoising(
         env.render(ax)
 
         # Original input path (dashed reference)
-        if dim >= 3 and _is_3d_ax(ax) and input_np.shape[-1] >= 3:
-            ax.plot(input_np[:, 0], input_np[:, 1], input_np[:, 2], color="blue",
-                    linewidth=2.0, alpha=0.4, linestyle="--", zorder=4, label="Input Path")
-        else:
-            ax.plot(input_np[:, 0], input_np[:, 1], color="blue", linewidth=2.0,
-                    alpha=0.4, linestyle="--", zorder=4, label="Input Path")
+        _draw_path(ax, input_np, robot=robot, env=env, tensor_args=ta,
+                   color="blue", linewidth=2.0, alpha=0.4, linestyle="--", zorder=4, label="Input Path")
 
         # Current iteration trajectories — colour by collision validity
         trajs_unvalid, trajs_valid = planning_task.get_trajs_unvalid_and_valid(trajs_selection[i])
         if trajs_unvalid is not None:
             for traj in trajs_unvalid:
                 traj_np = to_numpy(traj)
-                if dim >= 3 and _is_3d_ax(ax) and traj_np.shape[-1] >= 3:
-                    ax.plot(traj_np[:, 0], traj_np[:, 1], traj_np[:, 2], color="black",
+                if high_dof and dim >= 3:
+                    traj_ts = _path_to_taskspace(traj_np, robot, ta)
+                else:
+                    traj_ts = traj_np
+                if _is_3d_ax(ax) and traj_ts.shape[-1] >= 3:
+                    ax.plot(traj_ts[:, 0], traj_ts[:, 1], traj_ts[:, 2], color="black",
                             linewidth=1.2, alpha=0.6, zorder=5)
                 else:
-                    ax.plot(traj_np[:, 0], traj_np[:, 1], color="black",
+                    ax.plot(traj_ts[:, 0], traj_ts[:, 1], color="black",
                             linewidth=1.2, alpha=0.6, zorder=5)
         if trajs_valid is not None:
             for traj in trajs_valid:
                 traj_np = to_numpy(traj)
-                if dim >= 3 and _is_3d_ax(ax) and traj_np.shape[-1] >= 3:
-                    ax.plot(traj_np[:, 0], traj_np[:, 1], traj_np[:, 2], color="orange",
+                if high_dof and dim >= 3:
+                    traj_ts = _path_to_taskspace(traj_np, robot, ta)
+                else:
+                    traj_ts = traj_np
+                if _is_3d_ax(ax) and traj_ts.shape[-1] >= 3:
+                    ax.plot(traj_ts[:, 0], traj_ts[:, 1], traj_ts[:, 2], color="orange",
                             linewidth=1.2, alpha=0.6, zorder=5)
                 else:
-                    ax.plot(traj_np[:, 0], traj_np[:, 1], color="orange",
+                    ax.plot(traj_ts[:, 0], traj_ts[:, 1], color="orange",
                             linewidth=1.2, alpha=0.6, zorder=5)
 
         # Best trajectory on the last frame
         if traj_pos_best is not None and i == n_frames - 1:
             best_np = to_numpy(traj_pos_best)
-            if dim >= 3 and _is_3d_ax(ax) and best_np.shape[-1] >= 3:
-                ax.plot(best_np[:, 0], best_np[:, 1], best_np[:, 2], color="green",
-                        linewidth=2.5, zorder=10, label="Best")
-            else:
-                ax.plot(best_np[:, 0], best_np[:, 1], color="green",
-                        linewidth=2.5, zorder=10, label="Best")
+            _draw_path(ax, best_np, robot=robot, env=env, tensor_args=ta,
+                       color="green", linewidth=2.5, zorder=10, label="Best")
 
         # Start / goal markers
-        if dim >= 3 and _is_3d_ax(ax):
-            ax.scatter(start_np[0], start_np[1], start_np[2] if len(start_np) > 2 else 0,
-                       color="blue", marker="X", s=10**2.5, zorder=100, label="Start")
-            ax.scatter(goal_np[0], goal_np[1], goal_np[2] if len(goal_np) > 2 else 0,
-                       color="red", marker="X", s=10**2.5, zorder=100, label="Goal")
-        else:
-            ax.scatter(start_np[0], start_np[1], color="blue", marker="X",
-                       s=10**2.5, zorder=100, label="Start")
-            ax.scatter(goal_np[0], goal_np[1], color="red", marker="X",
-                       s=10**2.5, zorder=100, label="Goal")
+        _draw_start_goal(ax, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
 
         ax.legend(loc="upper left", fontsize=8)
 
@@ -254,42 +262,44 @@ def plot_sdedit_results(
     obstacle_modification=None,
     figsize=(10, 10),
     save_path=None,
+    robot=None,
+    tensor_args=None,
 ):
     """
     Single plot: obstacles + input path + regenerated paths + best path.
-    Supports both 2D and 3D environments.
+    Supports both 2D and 3D environments. For high-DOF robots, applies FK to
+    convert joint-space paths to task-space end-effector positions.
     """
     dim = env.dim
+    ta = tensor_args or {"device": "cpu", "dtype": torch.float32}
     fig, ax = create_fig_and_axes(dim=dim, figsize=figsize)
 
     env.render(ax)
 
     regen_np = to_numpy(regenerated_paths) if torch.is_tensor(regenerated_paths) else regenerated_paths
-    for i in range(min(regen_np.shape[0], 50)):
-        if _is_3d_ax(ax) and regen_np.shape[-1] >= 3:
-            ax.plot(regen_np[i, :, 0], regen_np[i, :, 1], regen_np[i, :, 2],
+    if _needs_fk(regen_np, env) and _is_3d_ax(ax):
+        regen_ts = _batch_paths_to_taskspace(regen_np, robot, ta)
+    else:
+        regen_ts = regen_np
+    for i in range(min(regen_ts.shape[0], 50)):
+        if _is_3d_ax(ax) and regen_ts.shape[-1] >= 3:
+            ax.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], regen_ts[i, :, 2],
                     color='orange', alpha=0.15, linewidth=1.0)
         else:
-            ax.plot(regen_np[i, :, 0], regen_np[i, :, 1], color='orange', alpha=0.15, linewidth=1.0)
+            ax.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], color='orange', alpha=0.15, linewidth=1.0)
 
     input_np = to_numpy(input_path) if torch.is_tensor(input_path) else input_path
-    _draw_path(ax, input_np, color='blue', linewidth=2.5, label='Input Path', zorder=5)
+    _draw_path(ax, input_np, robot=robot, env=env, tensor_args=ta,
+               color='blue', linewidth=2.5, label='Input Path', zorder=5)
 
     if best_path is not None:
         best_np = to_numpy(best_path) if torch.is_tensor(best_path) else best_path
-        _draw_path(ax, best_np, color='green', linewidth=2.5, label='Best Regenerated', zorder=6)
+        _draw_path(ax, best_np, robot=robot, env=env, tensor_args=ta,
+                   color='green', linewidth=2.5, label='Best Regenerated', zorder=6)
 
     start_np = to_numpy(q_pos_start) if torch.is_tensor(q_pos_start) else q_pos_start
     goal_np = to_numpy(q_pos_goal) if torch.is_tensor(q_pos_goal) else q_pos_goal
-
-    if _is_3d_ax(ax):
-        ax.scatter(start_np[0], start_np[1], start_np[2] if len(start_np) > 2 else 0,
-                   color="green", marker="o", s=144, zorder=10, label='Start')
-        ax.scatter(goal_np[0], goal_np[1], goal_np[2] if len(goal_np) > 2 else 0,
-                   color="red", marker="*", s=200, zorder=10, label='Goal')
-    else:
-        ax.plot(*start_np[:2], 'go', markersize=12, zorder=10, label='Start')
-        ax.plot(*goal_np[:2], 'r*', markersize=15, zorder=10, label='Goal')
+    _draw_start_goal(ax, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
 
     _annotate_obstacle_mod(ax, obstacle_modification)
 
@@ -318,12 +328,15 @@ def plot_noise_level_comparison(
     results_by_noise_level,
     figsize=(20, 5),
     save_path=None,
+    robot=None,
+    tensor_args=None,
 ):
     """
     Side-by-side comparison of SDEdit results at different noise levels.
     Supports both 2D and 3D environments.
     """
     dim = env.dim
+    ta = tensor_args or {"device": "cpu", "dtype": torch.float32}
     n_levels = len(results_by_noise_level)
 
     if dim >= 3:
@@ -343,27 +356,26 @@ def plot_noise_level_comparison(
         env.render(ax)
 
         regen_np = to_numpy(regen_paths) if torch.is_tensor(regen_paths) else regen_paths
-        for i in range(min(regen_np.shape[0], 30)):
-            if _is_3d_ax(ax) and regen_np.shape[-1] >= 3:
-                ax.plot(regen_np[i, :, 0], regen_np[i, :, 1], regen_np[i, :, 2],
+        if _needs_fk(regen_np, env) and _is_3d_ax(ax):
+            regen_ts = _batch_paths_to_taskspace(regen_np, robot, ta)
+        else:
+            regen_ts = regen_np
+        for i in range(min(regen_ts.shape[0], 30)):
+            if _is_3d_ax(ax) and regen_ts.shape[-1] >= 3:
+                ax.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], regen_ts[i, :, 2],
                         color='orange', alpha=0.2, linewidth=0.8)
             else:
-                ax.plot(regen_np[i, :, 0], regen_np[i, :, 1], color='orange', alpha=0.2, linewidth=0.8)
+                ax.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], color='orange', alpha=0.2, linewidth=0.8)
 
-        _draw_path(ax, input_np, color='blue', linewidth=2.0, label='Input')
+        _draw_path(ax, input_np, robot=robot, env=env, tensor_args=ta,
+                   color='blue', linewidth=2.0, label='Input')
 
         if best_path is not None:
             best_np = to_numpy(best_path) if torch.is_tensor(best_path) else best_path
-            _draw_path(ax, best_np, color='green', linewidth=2.0, label='Best')
+            _draw_path(ax, best_np, robot=robot, env=env, tensor_args=ta,
+                       color='green', linewidth=2.0, label='Best')
 
-        if _is_3d_ax(ax):
-            ax.scatter(start_np[0], start_np[1], start_np[2] if len(start_np) > 2 else 0,
-                       color="green", marker="o", s=100, zorder=10)
-            ax.scatter(goal_np[0], goal_np[1], goal_np[2] if len(goal_np) > 2 else 0,
-                       color="red", marker="*", s=120, zorder=10)
-        else:
-            ax.plot(*start_np[:2], 'go', markersize=10, zorder=10)
-            ax.plot(*goal_np[:2], 'r*', markersize=12, zorder=10)
+        _draw_start_goal(ax, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
 
         ax.set_aspect('equal')
         ax.set_title(f't_noise = {noise_level}', fontsize=12)
@@ -389,6 +401,68 @@ def _is_3d_ax(ax):
     return getattr(ax, "name", "") == "3d"
 
 
+def _needs_fk(path_np, env):
+    """Return True when path is in joint space but env is in task space (high-DOF robot)."""
+    return path_np.shape[-1] > env.dim
+
+
+def _path_to_taskspace(path_np, robot, tensor_args):
+    """
+    Convert a joint-space path (N, q_dim) to task-space end-effector positions (N, 3)
+    using the robot's forward kinematics.
+    Returns the original path unchanged if FK is not available.
+    """
+    if robot is None:
+        return path_np[:, :3]
+    try:
+        import torch as _torch
+        q = _torch.as_tensor(path_np, dtype=tensor_args.get("dtype", _torch.float32),
+                             device=tensor_args.get("device", "cpu"))
+        if q.dim() == 2:
+            q = q.unsqueeze(0)  # (1, N, q_dim)
+        fk = robot.fk_map_collision(q)  # (1, N, n_links, 3)
+        fk_np = to_numpy(fk.squeeze(0))  # (N, n_links, 3)
+        return fk_np[:, -1, :]  # end-effector: (N, 3)
+    except Exception as e:
+        print(f"[sdedit_plots] FK failed: {e} — falling back to first 3 dims")
+        return path_np[:, :3]
+
+
+def _batch_paths_to_taskspace(paths_np, robot, tensor_args):
+    """
+    Convert a batch of joint-space paths (B, N, q_dim) to task-space (B, N, 3).
+    """
+    if robot is None:
+        return paths_np[..., :3]
+    try:
+        import torch as _torch
+        q = _torch.as_tensor(paths_np, dtype=tensor_args.get("dtype", _torch.float32),
+                             device=tensor_args.get("device", "cpu"))
+        fk = robot.fk_map_collision(q)  # (B, N, n_links, 3)
+        fk_np = to_numpy(fk)
+        return fk_np[..., -1, :]  # (B, N, 3) — end-effector
+    except Exception as e:
+        print(f"[sdedit_plots] Batch FK failed: {e} — falling back to first 3 dims")
+        return paths_np[..., :3]
+
+
+def _point_to_taskspace(point_np, robot, tensor_args):
+    """
+    Convert a single joint-space config (q_dim,) to task-space end-effector (3,).
+    """
+    if robot is None:
+        return point_np[:3]
+    try:
+        import torch as _torch
+        q = _torch.as_tensor(point_np, dtype=tensor_args.get("dtype", _torch.float32),
+                             device=tensor_args.get("device", "cpu")).unsqueeze(0)
+        fk = robot.fk_map_collision(q)  # (1, n_links, 3)
+        fk_np = to_numpy(fk.squeeze(0))  # (n_links, 3)
+        return fk_np[-1, :]  # end-effector: (3,)
+    except Exception:
+        return point_np[:3]
+
+
 def _render_env_on_ax(ax, env, dim, draw_extra=True):
     """Render environment obstacles using the existing env.render infrastructure."""
     if env.obj_fixed_list:
@@ -408,30 +482,33 @@ def _render_env_on_ax(ax, env, dim, draw_extra=True):
     ax.set_ylabel("y")
 
 
-def _draw_path(ax, path_np, **kwargs):
-    """Draw a path on an axis (2D or 3D)."""
-    if _is_3d_ax(ax) and path_np.shape[-1] >= 3:
-        ax.plot(path_np[:, 0], path_np[:, 1], path_np[:, 2], **kwargs)
+def _draw_path(ax, path_np, robot=None, env=None, tensor_args=None, **kwargs):
+    """Draw a path on an axis (2D or 3D), applying FK for high-DOF robots."""
+    pts = path_np
+    if env is not None and _needs_fk(path_np, env) and _is_3d_ax(ax):
+        ta = tensor_args or {"device": "cpu", "dtype": torch.float32}
+        pts = _path_to_taskspace(path_np, robot, ta)
+    if _is_3d_ax(ax) and pts.shape[-1] >= 3:
+        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], **kwargs)
     else:
-        ax.plot(path_np[:, 0], path_np[:, 1], **kwargs)
+        ax.plot(pts[:, 0], pts[:, 1], **kwargs)
 
 
-def _draw_start_goal(ax, start_np, goal_np, robot, dim):
-    """Draw start and goal markers (2D or 3D)."""
+def _draw_start_goal(ax, start_np, goal_np, robot, dim, env=None, tensor_args=None):
+    """Draw start and goal markers (2D or 3D), applying FK for high-DOF robots."""
+    s_pt, g_pt = start_np, goal_np
+    if env is not None and dim >= 3 and len(start_np) > env.dim:
+        ta = tensor_args or {"device": "cpu", "dtype": torch.float32}
+        s_pt = _point_to_taskspace(start_np, robot, ta)
+        g_pt = _point_to_taskspace(goal_np, robot, ta)
+
     if dim >= 3 and _is_3d_ax(ax):
-        # For high-DOF robots use the robot renderer if available
-        if robot is not None and hasattr(robot, "render"):
-            try:
-                robot.render(ax, q_pos=start_np, color="blue", cmap="Blues")
-                robot.render(ax, q_pos=goal_np, color="red", cmap="Reds")
-                return
-            except Exception:
-                pass
-        # Fallback: plot in task space (first 3 dims)
-        ax.scatter(start_np[0], start_np[1], start_np[2] if len(start_np) > 2 else 0,
-                   color="blue", marker="X", s=10**2.7, zorder=100, label="Start")
-        ax.scatter(goal_np[0], goal_np[1], goal_np[2] if len(goal_np) > 2 else 0,
-                   color="red", marker="X", s=10**2.7, zorder=100, label="Goal")
+        ax.scatter(s_pt[0], s_pt[1], s_pt[2] if len(s_pt) > 2 else 0,
+                   color="green", marker="o", s=144, zorder=100, label="Start",
+                   edgecolors="black", linewidths=1.5)
+        ax.scatter(g_pt[0], g_pt[1], g_pt[2] if len(g_pt) > 2 else 0,
+                   color="red", marker="*", s=200, zorder=100, label="Goal",
+                   edgecolors="black", linewidths=1.0)
     else:
         ax.scatter(start_np[0], start_np[1], color="blue", marker="X",
                    s=10**2.7, zorder=100, label="Start")

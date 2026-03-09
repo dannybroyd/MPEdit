@@ -303,6 +303,8 @@ def experiment(
                 title=f"SDEdit (t_noise={noise_levels[0]}, mode={sdedit_mode})",
                 obstacle_modification=obstacle_mod if sdedit_mode == "replan" else None,
                 save_path=os.path.join(results_dir, f"sdedit_result-{idx_sg:03d}.png"),
+                robot=planning_task.robot,
+                tensor_args=tensor_args,
             )
             plt.close(fig)
         else:
@@ -318,6 +320,8 @@ def experiment(
                 input_path,
                 regen_dict,
                 save_path=os.path.join(results_dir, f"sdedit_comparison-{idx_sg:03d}.png"),
+                robot=planning_task.robot,
+                tensor_args=tensor_args,
             )
             plt.close(fig)
 
