@@ -43,6 +43,7 @@ class EvaluationSamplesGenerator:
         debug=False,
         render_pybullet=False,
         min_distance_q_pos_start_goal=None,
+        max_get_data_sample_attempts=None,
         **kwargs,
     ):
         self.tensor_args = tensor_args
@@ -65,6 +66,15 @@ class EvaluationSamplesGenerator:
         self.min_distance_q_pos_start_goal = None
         if min_distance_q_pos_start_goal is not None:
             self.min_distance_q_pos_start_goal = min_distance_q_pos_start_goal
+        self.max_get_data_sample_attempts = max_get_data_sample_attempts
+        if self.max_get_data_sample_attempts is None:
+            if self.select_start_goal_from_file is not None:
+                n_candidates = len(self.select_start_goal_from_file)
+            elif self.idxs_dataset_subset is not None:
+                n_candidates = len(self.idxs_dataset_subset)
+            else:
+                n_candidates = 0
+            self.max_get_data_sample_attempts = max(100, 2 * n_candidates) if n_candidates > 0 else 100
 
         # OMPL worker to generate random start and goal joint positions
         self.generate_data_ompl_worker = GenerateDataOMPL(
@@ -82,43 +92,84 @@ class EvaluationSamplesGenerator:
 
         self.ee_markers_ids = []
 
-    def get_data_sample(self, idx, **kwargs):
+    def _get_raw_data_sample(self, idx):
+        """Get one unvalidated start/goal/EE sample by index (with wrapping)."""
+        if self.select_start_goal_from_file is not None:
+            n_candidates = len(self.select_start_goal_from_file)
+            if n_candidates == 0:
+                raise RuntimeError("selection_start_goal file is empty; no start/goal samples available.")
+            idx_wrapped = idx % n_candidates
+            q_pos_start = to_torch(self.select_start_goal_from_file[idx_wrapped]["q_pos_start"], **self.tensor_args)
+            q_pos_goal = to_torch(self.select_start_goal_from_file[idx_wrapped]["q_pos_goal"], **self.tensor_args)
+            ee_pose_goal_flat = self.select_start_goal_from_file[idx_wrapped]["ee_pose_goal"]
+            ee_pose_goal = to_torch(ee_pose_goal_flat, **self.tensor_args).view(3, 4)
+            return q_pos_start, q_pos_goal, ee_pose_goal
+
+        if self.idxs_dataset_subset is None or len(self.idxs_dataset_subset) == 0:
+            raise RuntimeError("Dataset subset is empty; no start/goal samples available.")
+
+        idx_mapped = self.idxs_dataset_subset[idx % len(self.idxs_dataset_subset)]
+        input_data_one_sample = self.dataset_subset[idx_mapped]
+        q_pos_start = input_data_one_sample[self.dataset_subset.dataset.field_key_q_start]
+        q_pos_goal = input_data_one_sample[self.dataset_subset.dataset.field_key_q_goal]
+        ee_pose_goal = input_data_one_sample[self.dataset_subset.dataset.field_key_context_ee_goal_pose]
+        return q_pos_start, q_pos_goal, ee_pose_goal
+
+    @staticmethod
+    def _should_log_rejection(attempt_idx, max_attempts):
+        return attempt_idx < 5 or (attempt_idx + 1) % 25 == 0 or (attempt_idx + 1) == max_attempts
+
+    def _log_rejection(self, message, attempt_idx, max_attempts):
+        if self._should_log_rejection(attempt_idx, max_attempts):
+            print(f"{message} [{attempt_idx + 1}/{max_attempts}]")
+
+    def get_data_sample(self, idx, max_attempts=None, **kwargs):
         # -----------------------------------------------
         # Get the start and goal states
         # If extra objects are used, since they are not part of the original environment,
         # the start goal states from the training or validation sets might be in collision.
-        # We just reject those samples and get new ones.
-        if self.select_start_goal_from_file:
-            idx = idx % len(self.select_start_goal_from_file)
-            q_pos_start = to_torch(self.select_start_goal_from_file[idx]["q_pos_start"], **self.tensor_args)
-            q_pos_goal = to_torch(self.select_start_goal_from_file[idx]["q_pos_goal"], **self.tensor_args)
-            ee_pose_goal_flat = self.select_start_goal_from_file[idx]["ee_pose_goal"]
-            ee_pose_goal = to_torch(ee_pose_goal_flat, **self.tensor_args).view(3, 4)
-        else:
-            idx = self.idxs_dataset_subset[idx % len(self.idxs_dataset_subset)]
-            input_data_one_sample = self.dataset_subset[idx]
-            q_pos_start = input_data_one_sample[self.dataset_subset.dataset.field_key_q_start]
-            q_pos_goal = input_data_one_sample[self.dataset_subset.dataset.field_key_q_goal]
-            ee_pose_goal = input_data_one_sample[self.dataset_subset.dataset.field_key_context_ee_goal_pose]
+        # We reject those samples and keep scanning with bounded retries.
+        max_attempts = self.max_get_data_sample_attempts if max_attempts is None else int(max_attempts)
+        if max_attempts <= 0:
+            raise ValueError(f"max_attempts must be positive, got {max_attempts}")
 
-        if not self.generate_data_ompl_worker.pbompl_interface.is_state_valid(to_numpy(q_pos_start)):
-            print("Start state is in collision. Getting new sample...")
-            return self.get_data_sample(idx + 1)
+        idx_start = int(idx)
+        n_start_collision = 0
+        n_goal_collision = 0
+        n_too_close = 0
 
-        if not self.generate_data_ompl_worker.pbompl_interface.is_state_valid(to_numpy(q_pos_goal)):
-            print("Goal state is in collision. Getting new sample...")
-            return self.get_data_sample(idx + 1)
+        for attempt_idx in range(max_attempts):
+            sample_idx = idx_start + attempt_idx
+            q_pos_start, q_pos_goal, ee_pose_goal = self._get_raw_data_sample(sample_idx)
 
-        q_pos_start = to_torch(q_pos_start, **self.tensor_args)
-        q_pos_goal = to_torch(q_pos_goal, **self.tensor_args)
+            if not self.generate_data_ompl_worker.pbompl_interface.is_state_valid(to_numpy(q_pos_start)):
+                n_start_collision += 1
+                self._log_rejection("Start state is in collision. Getting new sample...", attempt_idx, max_attempts)
+                continue
 
-        if torch.linalg.norm(q_pos_goal - q_pos_start) < self.min_distance_q_pos_start_goal:
-            print("Start and goal states are too close. Getting new sample...")
-            return self.get_data_sample(idx + 1)
+            if not self.generate_data_ompl_worker.pbompl_interface.is_state_valid(to_numpy(q_pos_goal)):
+                n_goal_collision += 1
+                self._log_rejection("Goal state is in collision. Getting new sample...", attempt_idx, max_attempts)
+                continue
 
-        ee_pose_goal = to_torch(ee_pose_goal, **self.tensor_args)
+            q_pos_start = to_torch(q_pos_start, **self.tensor_args)
+            q_pos_goal = to_torch(q_pos_goal, **self.tensor_args)
+            if self.min_distance_q_pos_start_goal is not None:
+                if torch.linalg.norm(q_pos_goal - q_pos_start) < self.min_distance_q_pos_start_goal:
+                    n_too_close += 1
+                    self._log_rejection("Start and goal states are too close. Getting new sample...", attempt_idx, max_attempts)
+                    continue
 
-        return q_pos_start, q_pos_goal, ee_pose_goal
+            ee_pose_goal = to_torch(ee_pose_goal, **self.tensor_args)
+            return q_pos_start, q_pos_goal, ee_pose_goal
+
+        raise RuntimeError(
+            "Could not find a valid start/goal sample after "
+            f"{max_attempts} attempts starting from idx={idx_start}. "
+            f"Rejected: start_collision={n_start_collision}, "
+            f"goal_collision={n_goal_collision}, too_close={n_too_close}. "
+            f"min_distance_q_pos_start_goal={self.min_distance_q_pos_start_goal}."
+        )
 
     def add_start_goal_marker(self, q_pos_start, q_pos_goal=None, ee_pose_goal=None, **kwargs):
         # remove markers first

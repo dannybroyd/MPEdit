@@ -201,7 +201,11 @@ def experiment(
 
         results_single_plan = DotMap(t_generator=0.0, t_guide=0.0)
 
-        q_pos_start, q_pos_goal, ee_pose_goal = evaluation_samples_generator.get_data_sample(idx_sg)
+        try:
+            q_pos_start, q_pos_goal, ee_pose_goal = evaluation_samples_generator.get_data_sample(idx_sg)
+        except RuntimeError as e:
+            print(f"Skipping sample {idx_sg}: could not get valid start/goal ({e})")
+            continue
 
         print("\n----------------START AND GOAL states----------------")
         print(f"q_pos_start: {q_pos_start}")

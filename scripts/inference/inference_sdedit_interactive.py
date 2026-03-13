@@ -158,7 +158,11 @@ def experiment(
         print(f"SAMPLE {idx_sg+1}/{n_start_goal_states}")
         print(f"{'='*80}")
 
-        q_pos_start, q_pos_goal, ee_pose_goal = evaluation_samples_generator.get_data_sample(idx_sg)
+        try:
+            q_pos_start, q_pos_goal, ee_pose_goal = evaluation_samples_generator.get_data_sample(idx_sg)
+        except RuntimeError as e:
+            print(f"Could not get a valid start/goal sample for idx={idx_sg}. Skipping. ({e})")
+            continue
         print(f"Start: {q_pos_start}")
         print(f"Goal:  {q_pos_goal}")
 

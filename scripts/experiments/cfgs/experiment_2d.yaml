@@ -1,0 +1,80 @@
+# MPEdit Experiment Configuration — 2D (EnvSimple2D + RobotPointMass2D)
+#
+# This config defines parameters for all 5 experiments in the paper.
+# Used by: scripts/experiments/run_experiment.py
+
+# Base inference config (points to the trained model and planner settings)
+base_inference_config: './cfgs/config_EnvSimple2D-RobotPointMass2D_sdedit.yaml'
+
+# Random seed for reproducibility
+seed: 42
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Common settings
+# ─────────────────────────────────────────────────────────────────────────────
+common:
+  n_start_goal_pairs: 50          # Number of start/goal pairs per experiment
+  n_trajectory_samples: 100       # SDEdit samples per run
+  selection_start_goal: 'validation'
+  device: 'cuda:0'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 1: t₀ Sweep — The Money Plot
+# ─────────────────────────────────────────────────────────────────────────────
+exp1_t0_sweep:
+  enabled: true
+  noise_levels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  # Use a single "medium" obstacle scenario for consistency
+  obstacle_difficulty: 'medium'
+  results_subdir: 'exp1_t0_sweep'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 2: Re-planning — SDEdit vs Baselines
+# ─────────────────────────────────────────────────────────────────────────────
+exp2_baselines:
+  enabled: true
+  # Optimal t₀ from experiment 1 (update after running exp1)
+  sdedit_noise_level: 7
+  # Full MPD uses t₀=0 (equivalent to generating from scratch)
+  full_mpd_noise_level: 0
+  # Difficulty scenarios
+  scenarios: ['easy', 'medium', 'hard', 'removal']
+  # RRTConnect timeout in seconds
+  rrt_allowed_time: 10.0
+  results_subdir: 'exp2_baselines'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 3: Sketch-to-Path (2D only)
+# ─────────────────────────────────────────────────────────────────────────────
+exp3_sketch:
+  enabled: true
+  # Gaussian noise sigmas for synthetic sketches
+  noise_sigmas: [0.05, 0.1, 0.2, 0.3]
+  # SDEdit noise levels to test for each sketch quality
+  noise_levels: [3, 5, 7, 9, 11]
+  n_sketches_per_sigma: 1        # Number of synthetic sketches per sigma per start/goal pair
+  results_subdir: 'exp3_sketch'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 4: Inference Speed
+# ─────────────────────────────────────────────────────────────────────────────
+exp4_speed:
+  enabled: true
+  noise_levels: [1, 3, 5, 7, 9, 11, 13]
+  n_timing_runs: 50              # Number of runs for stable timing
+  # Include baselines
+  time_full_mpd: true
+  time_rrt: true
+  rrt_allowed_time: 10.0
+  results_subdir: 'exp4_speed'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 5: Diversity Analysis
+# ─────────────────────────────────────────────────────────────────────────────
+exp5_diversity:
+  enabled: true
+  noise_levels: [1, 3, 5, 7, 9, 11, 13]
+  n_trajectory_samples: 100      # Generate 100 trajectories per t₀
+  n_start_goal_pairs: 10         # Fewer pairs needed (diversity within each)
+  obstacle_difficulty: 'medium'
+  results_subdir: 'exp5_diversity'

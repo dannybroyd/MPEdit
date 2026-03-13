@@ -1,0 +1,26 @@
+\begin{table}[h]
+\centering
+\caption{Re-planning comparison across difficulty scenarios.}
+\label{tab:baselines}
+\begin{tabular}{llrrrrrr}
+\toprule
+Scenario & Method & S% & Fréchet↓ & L2↓ & Time(s)↓ & PathLen & Smooth \\
+\midrule
+easy & SDEdit & 90.4% & 0.177 & 0.084 & 0.754 & 1.825 & 0.000 \\
+easy & Full MPD & 88.3% & 0.221 & 0.107 & 0.879 & 1.828 & 0.000 \\
+easy & RRTConnect & 100.0% & 0.169 & 0.079 & 0.272 & 1.758 & 0.000 \\
+\midrule
+hard & SDEdit & 24.6% & 0.308 & 0.155 & 0.472 & 2.134 & 0.000 \\
+hard & Full MPD & 29.4% & 0.343 & 0.175 & 0.583 & 2.103 & 0.000 \\
+hard & RRTConnect & 100.0% & 0.219 & 0.104 & 0.274 & 1.809 & 0.000 \\
+\midrule
+medium & SDEdit & 42.9% & 0.263 & 0.111 & 0.531 & 1.947 & 0.000 \\
+medium & Full MPD & 46.2% & 0.279 & 0.120 & 0.626 & 1.941 & 0.000 \\
+medium & RRTConnect & 100.0% & 0.169 & 0.084 & 0.284 & 1.796 & 0.000 \\
+\midrule
+removal & SDEdit & 95.8% & 0.191 & 0.095 & 0.439 & 1.823 & 0.000 \\
+removal & Full MPD & 97.6% & 0.238 & 0.119 & 0.552 & 1.815 & 0.000 \\
+removal & RRTConnect & 100.0% & 0.233 & 0.116 & 0.273 & 1.781 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -148,10 +148,14 @@ class CostGuideManagerParametricTrajectory:
         assert q_traj_pos_in_phase.ndim == 3
         q_traj_pos_in_phase_original_shape = q_traj_pos_in_phase.shape
         q_traj_pos_aux = einops.rearrange(q_traj_pos_in_phase, "... d -> (...) d")
+        # We use explicit geometric Jacobians from torchkin for chain-rule gradients.
+        # Detach here to avoid autograd tracking through FK/JFK internals, which can
+        # accumulate graph state across repeated guide calls.
+        q_traj_pos_aux_detached = q_traj_pos_aux.detach()
 
         with TimerCUDA() as t_fk_jac:
             # collision links and jacobians
-            jacs_spatial, link_poses = self.robot.jfk_s_collision_spheres(q_traj_pos_aux)
+            jacs_spatial, link_poses = self.robot.jfk_s_collision_spheres(q_traj_pos_aux_detached)
             jacs_spatial_th = torch.stack(jacs_spatial).transpose(
                 0, 1
             )  # ((batch_size, traejectory_length), n_links, 6, d)
@@ -164,7 +168,7 @@ class CostGuideManagerParametricTrajectory:
             )
 
             # end effector links and jacobians
-            jacs_spatial_ee, link_poses_ee = self.robot.jfk_s_ee(q_traj_pos_aux)
+            jacs_spatial_ee, link_poses_ee = self.robot.jfk_s_ee(q_traj_pos_aux_detached)
             jacs_spatial_th_ee = torch.stack(jacs_spatial_ee).transpose(
                 0, 1
             )  # ((batch_size, traejectory_length), n_links, 6, d)
@@ -304,7 +308,13 @@ class CostGuideManagerParametricTrajectory:
         # Increment step counter
         if not warmup:
             self.step_guide_call += 1
+        # We only need numeric guide gradients for sampling updates; detach to avoid
+        # retaining autograd graphs across repeated guide calls.
+        grad_costs_all_wrt_cp_normalized = grad_costs_all_wrt_cp_normalized.detach()
+
         if return_cost:
+            if torch.is_tensor(cost_all):
+                cost_all = cost_all.detach()
             return cost_all, grad_costs_all_wrt_cp_normalized
         return grad_costs_all_wrt_cp_normalized
 
@@ -517,7 +527,7 @@ class CostJointSpacePathLength(CostJointSpace):
         q_traj_pos_diff = torch.zeros_like(q_traj_pos_in_phase)
         q_traj_pos_diff[..., 1:, :] = torch.diff(q_traj_pos_in_phase, dim=-2)
         cost_pos = 0.5 * torch.linalg.norm(q_traj_pos_diff, dim=-1)
-        grad_cost_wrt_q_pos = torch.autograd.grad(cost_pos.sum(), [q_traj_pos_in_phase], retain_graph=True)[0]
+        grad_cost_wrt_q_pos = torch.autograd.grad(cost_pos.sum(), [q_traj_pos_in_phase], retain_graph=False)[0]
 
         grad_cost_pos_wrt_cp = self.compute_grad_cost_wrt_cp(
             control_points,
@@ -538,7 +548,7 @@ class CostJointSpaceVelocity(CostJointSpace):
     ):
         q_traj_vel_in_phase.requires_grad_(True)
         cost_vel = 0.5 * torch.linalg.norm(q_traj_vel_in_phase, dim=-1)
-        grad_cost_wrt_q_vel = torch.autograd.grad(cost_vel.sum(), [q_traj_vel_in_phase], retain_graph=True)[0]
+        grad_cost_wrt_q_vel = torch.autograd.grad(cost_vel.sum(), [q_traj_vel_in_phase], retain_graph=False)[0]
 
         grad_cost_vel_wrt_cp = self.compute_grad_cost_wrt_cp(
             control_points,
@@ -559,7 +569,7 @@ class CostJointSpaceAcceleration(CostJointSpace):
     ):
         q_traj_acc_in_phase.requires_grad_(True)
         cost_acc = 0.5 * torch.linalg.norm(q_traj_acc_in_phase, dim=-1)
-        grad_cost_wrt_q_acc = torch.autograd.grad(cost_acc.sum(), [q_traj_acc_in_phase], retain_graph=True)[0]
+        grad_cost_wrt_q_acc = torch.autograd.grad(cost_acc.sum(), [q_traj_acc_in_phase], retain_graph=False)[0]
 
         grad_cost_acc_wrt_cp = self.compute_grad_cost_wrt_cp(
             control_points,

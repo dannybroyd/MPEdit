@@ -474,6 +474,95 @@ The `GenerativeOptimizationPlanner` in `mpd/inference/inference.py` gained:
 
 
 ---
+
+## Paper Experiments
+
+The experiment infrastructure for the MPEdit paper is in `scripts/experiments/`. It runs all 5 experiments described in the experimental plan, saves structured results to disk, and generates publication-quality figures and tables.
+
+### Running Experiments
+
+```bash
+source set_env_variables.sh
+conda activate mpd-splines-public
+cd scripts/inference   # must be here so base config paths resolve
+
+# Run all experiments for 2D environment
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_2d.yaml
+
+# Run all experiments for 3D environment
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_3d.yaml
+
+# Run a single experiment (exp1, exp2, exp3, exp4, or exp5)
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_2d.yaml --only exp1
+
+# Custom results directory
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_2d.yaml --results_dir my_results
+```
+
+### Experiments
+
+| # | Name | Description |
+|---|---|---|
+| **exp1** | t₀ Sweep | Sweep noise level 1–14, measure success rate vs path faithfulness (Fréchet distance). Produces the "money plot" tradeoff curve. |
+| **exp2** | Baselines | Compare SDEdit re-planning vs Full MPD (from pure noise) vs RRTConnect across Easy/Medium/Hard/Removal scenarios. Reports success rate, Fréchet distance, L2 distance, inference time, path length, and smoothness. |
+| **exp3** | Sketch-to-Path | 2D only. Corrupt valid paths with Gaussian noise (σ = 0.05–0.3) to create synthetic sketches, then run SDEdit at multiple t₀ values. |
+| **exp4** | Inference Speed | Wall-clock timing of SDEdit at each t₀ vs Full MPD and RRT baselines. Reports speedup factors. |
+| **exp5** | Diversity | Measure output diversity (pairwise Fréchet/L2 distance among 100 trajectories) as a function of t₀. |
+
+### Generating Figures and Tables
+
+After running experiments:
+
+```bash
+cd scripts/inference
+
+# Generate all paper figures from saved results
+python ../experiments/plot_results.py --results_dir logs_experiments
+
+# Generate a single figure
+python ../experiments/plot_results.py --results_dir logs_experiments --only fig2
+```
+
+**Output figures** (saved to `logs_experiments/figures/`):
+
+| File | Description |
+|---|---|
+| `fig2_t0_sweep.pdf` | Dual Y-axis tradeoff: success rate vs Fréchet distance |
+| `fig_baselines_comparison.pdf` | Grouped bar chart: SDEdit vs Full MPD vs RRT |
+| `table1_baselines.tex` | LaTeX table for the paper |
+| `fig4_sketch_heatmap.pdf` | Success/faithfulness heatmap over (σ, t₀) |
+| `fig5_speed.pdf` | Inference time vs t₀ with baseline horizontal lines |
+| `fig6_diversity.pdf` | Pairwise diversity vs t₀ |
+
+### Experiment Configuration
+
+Experiment parameters are in YAML files under `scripts/experiments/cfgs/`:
+
+- `experiment_2d.yaml` — EnvSimple2D + RobotPointMass2D (all 5 experiments)
+- `experiment_3d.yaml` — EnvSpheres3D + RobotPanda (exp3 disabled — sketch mode impractical for 7-DOF)
+
+Key parameters you may want to tune:
+
+| Parameter | Location | Description |
+|---|---|---|
+| `common.n_start_goal_pairs` | experiment config | Number of test scenarios per experiment (50 default) |
+| `common.n_trajectory_samples` | experiment config | SDEdit samples per run (100 default) |
+| `exp2_baselines.sdedit_noise_level` | experiment config | Optimal t₀ from Experiment 1 (update after running exp1) |
+| `exp3_sketch.noise_sigmas` | experiment config | Gaussian noise levels for synthetic sketches |
+| `exp4_speed.n_timing_runs` | experiment config | Repetitions for stable timing (50 default) |
+
+### New Files Reference
+
+| File | Description |
+|---|---|
+| `scripts/experiments/run_experiment.py` | Main experiment runner (all 5 experiments) |
+| `scripts/experiments/plot_results.py` | Results aggregation and paper figure generation |
+| `scripts/experiments/cfgs/experiment_2d.yaml` | 2D experiment configuration |
+| `scripts/experiments/cfgs/experiment_3d.yaml` | 3D experiment configuration |
+| `mpd/metrics/sdedit_metrics.py` | SDEdit-specific metrics: discrete Fréchet distance, mean L2 distance, pairwise diversity |
+| `mpd/utils/scenario_generation.py` | Obstacle placement by difficulty, synthetic sketch generation |
+
+---
 ## Inference with pre-trained models
 
 The configuration files under [scripts/inference/cfgs](scripts/inference/cfgs) contain the hyperparameters for inference.\
