@@ -139,8 +139,21 @@ def setup_planning_infrastructure(exp_cfg, results_dir):
     )
 
 
+def sync_ompl_worker_with_planning_env(evaluation_samples_generator, planning_env):
+    """
+    Keep the OMPL worker collision world in sync with planning_task.env.
+
+    The OMPL worker stores a deep-copied environment at construction time, so any
+    later obstacle edits on planning_task.env must be explicitly mirrored.
+    """
+    worker = evaluation_samples_generator.generate_data_ompl_worker
+    worker.env_tr = deepcopy(planning_env)
+    worker.clear_obstacles()
+    worker.add_obstacles()
+
+
 def get_start_goal_and_reference_path(
-    evaluation_samples_generator, idx, args_inference, tensor_args,
+    evaluation_samples_generator, idx, args_inference, tensor_args, planning_env,
 ):
     """
     Get a start/goal pair and generate a reference path with RRTConnect.
@@ -148,6 +161,8 @@ def get_start_goal_and_reference_path(
     Returns:
         (q_pos_start, q_pos_goal, ee_pose_goal, reference_path) or None if RRT fails
     """
+    sync_ompl_worker_with_planning_env(evaluation_samples_generator, planning_env)
+
     try:
         q_pos_start, q_pos_goal, ee_pose_goal = evaluation_samples_generator.get_data_sample(idx)
     except RuntimeError as e:
@@ -215,10 +230,19 @@ def run_full_mpd_and_collect(planner, q_pos_start, q_pos_goal, ee_pose_goal, n_t
     return results
 
 
-def run_rrt_replan(evaluation_samples_generator, q_pos_start, q_pos_goal, args_inference, allowed_time=10.0):
+def run_rrt_replan(
+    evaluation_samples_generator,
+    q_pos_start,
+    q_pos_goal,
+    args_inference,
+    planning_env,
+    allowed_time=10.0,
+):
     """
     Run RRTConnect replanning and return timing + path.
     """
+    sync_ompl_worker_with_planning_env(evaluation_samples_generator, planning_env)
+
     q_pos_start_np = to_numpy(q_pos_start, dtype=np.float64)
     q_pos_goal_np = to_numpy(q_pos_goal, dtype=np.float64)
 
@@ -273,7 +297,9 @@ def run_exp1_t0_sweep(
         print(f"\n--- Pair {idx_sg + 1}/{n_pairs} ---")
 
         # Get reference path (before obstacle modification)
-        sample = get_start_goal_and_reference_path(eval_gen, idx_sg, args_inference, tensor_args)
+        sample = get_start_goal_and_reference_path(
+            eval_gen, idx_sg, args_inference, tensor_args, planning_task.env
+        )
         if sample is None:
             print(f"  RRT failed for pair {idx_sg}. Skipping.")
             continue
@@ -373,7 +399,9 @@ def run_exp2_baselines(
         for idx_sg in range(n_pairs):
             print(f"\n  Pair {idx_sg + 1}/{n_pairs}")
 
-            sample = get_start_goal_and_reference_path(eval_gen, idx_sg, args_inference, tensor_args)
+            sample = get_start_goal_and_reference_path(
+                eval_gen, idx_sg, args_inference, tensor_args, planning_task.env
+            )
             if sample is None:
                 print(f"    RRT failed for initial path. Skipping.")
                 continue
@@ -437,6 +465,7 @@ def run_exp2_baselines(
             try:
                 rrt_path, rrt_time = run_rrt_replan(
                     eval_gen, q_pos_start, q_pos_goal, args_inference,
+                    planning_task.env,
                     allowed_time=cfg.rrt_allowed_time,
                 )
                 if rrt_path is not None:
@@ -535,7 +564,9 @@ def run_exp3_sketch(
     for idx_sg in range(n_pairs):
         print(f"\n--- Pair {idx_sg + 1}/{n_pairs} ---")
 
-        sample = get_start_goal_and_reference_path(eval_gen, idx_sg, args_inference, tensor_args)
+        sample = get_start_goal_and_reference_path(
+            eval_gen, idx_sg, args_inference, tensor_args, planning_task.env
+        )
         if sample is None:
             print(f"  RRT failed. Skipping.")
             continue
@@ -628,7 +659,9 @@ def run_exp4_speed(
     n_runs = cfg.n_timing_runs
 
     # Get a single start/goal pair for consistent timing
-    sample = get_start_goal_and_reference_path(eval_gen, 0, args_inference, tensor_args)
+    sample = get_start_goal_and_reference_path(
+        eval_gen, 0, args_inference, tensor_args, planning_task.env
+    )
     if sample is None:
         print("Failed to get reference path for timing. Aborting Experiment 4.")
         return
@@ -689,6 +722,7 @@ def run_exp4_speed(
         for i in range(n_runs):
             _, t_rrt = run_rrt_replan(
                 eval_gen, q_pos_start, q_pos_goal, args_inference,
+                planning_task.env,
                 allowed_time=cfg.rrt_allowed_time,
             )
             timing_results["rrt"].append(t_rrt)
@@ -753,7 +787,9 @@ def run_exp5_diversity(
     for idx_sg in range(n_pairs):
         print(f"\n--- Pair {idx_sg + 1}/{n_pairs} ---")
 
-        sample = get_start_goal_and_reference_path(eval_gen, idx_sg, args_inference, tensor_args)
+        sample = get_start_goal_and_reference_path(
+            eval_gen, idx_sg, args_inference, tensor_args, planning_task.env
+        )
         if sample is None:
             print(f"  RRT failed. Skipping.")
             continue
