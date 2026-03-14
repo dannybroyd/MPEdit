@@ -48,6 +48,8 @@ class EnvBase(ABC):
 
         self.obj_fixed_list = obj_fixed_list if obj_fixed_list is not None else []
         self.obj_extra_list = obj_extra_list if obj_extra_list is not None else []
+        # Optional visualization mode: render extra objects using fixed-object style.
+        self.render_extra_as_fixed_color = False
         self.simplify_primitives()
         self.obj_all_list = None
         self.update_obj_all_list()
@@ -166,7 +168,10 @@ class EnvBase(ABC):
 
         if self.obj_extra_list:
             for obj in self.obj_extra_list:
-                obj.render(ax, color="red", cmap="Reds")
+                if self.render_extra_as_fixed_color:
+                    obj.render(ax)
+                else:
+                    obj.render(ax, color="red", cmap="Reds")
 
         ax.set_xlim(self.limits_np[0][0], self.limits_np[1][0])
         ax.set_ylim(self.limits_np[0][1], self.limits_np[1][1])

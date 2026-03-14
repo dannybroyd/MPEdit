@@ -37,7 +37,7 @@ exp1_t0_sweep:
 exp2_baselines:
   enabled: true
   # Optimal t₀ from experiment 1 (update after running exp1)
-  sdedit_noise_level: 7
+  sdedit_noise_level: 11
   # Full MPD uses t₀=0 (equivalent to generating from scratch)
   full_mpd_noise_level: 0
   # Difficulty scenarios

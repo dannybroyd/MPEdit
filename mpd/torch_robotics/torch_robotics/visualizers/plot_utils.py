@@ -4,7 +4,7 @@ from copy import copy
 import numpy as np
 import torch
 from matplotlib import pyplot as plt, collections as mcoll
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 from torch_robotics.torch_utils.torch_utils import to_numpy, DEFAULT_TENSOR_ARGS
 
@@ -79,7 +79,17 @@ def create_fig_and_axes(dim=2, figsize=(8, 6)):
 
 
 def create_animation_video(
-    fig, animate_fn, anim_time=5, n_frames=100, video_filepath="video.mp4", dpi=90, fargs=(), **kwargs
+    fig,
+    animate_fn,
+    anim_time=5,
+    n_frames=100,
+    video_filepath="video.mp4",
+    dpi=90,
+    fargs=(),
+    make_gif=False,
+    gif_filepath=None,
+    gif_fps=None,
+    **kwargs,
 ):
     str_start = "Creating animation"
     print(f"{str_start}...")
@@ -88,10 +98,22 @@ def create_animation_video(
     )
     print(f"...finished {str_start}")
 
+    fps = max(1, int(n_frames / anim_time))
+
     str_start = "Saving video"
     print(f"{str_start}...")
-    ani.save(os.path.join(video_filepath), fps=max(1, int(n_frames / anim_time)), dpi=dpi)
+    ani.save(os.path.join(video_filepath), fps=fps, dpi=dpi)
     print(f"...finished {str_start}")
+
+    if make_gif:
+        if gif_filepath is None:
+            gif_filepath = os.path.splitext(video_filepath)[0] + ".gif"
+        if gif_fps is None:
+            gif_fps = fps
+        str_start = "Saving GIF"
+        print(f"{str_start}...")
+        ani.save(gif_filepath, writer=PillowWriter(fps=gif_fps), dpi=dpi)
+        print(f"...finished {str_start}")
 
 
 def plot_multiline(ax, X, Y, color="blue", linestyle="solid", plot_scatter_points=False, **kwargs):

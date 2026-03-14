@@ -8,6 +8,10 @@ Supports two modes:
 Usage:
   cd scripts/inference
   python inference_sdedit.py
+
+  # Also export GIFs (denoising + robot-env optimization animation)
+  python inference_sdedit.py --cfg_inference_path ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml \
+    --render_denoising_gif True --render_env_robot_opt_iters_gif True
 """
 
 from mpd.utils.patches import numpy_monkey_patch
@@ -38,7 +42,7 @@ from mpd.plotting.sdedit_plots import (
 from mpd.utils.loaders import get_planning_task_and_dataset, load_params_from_yaml, save_to_yaml
 from mpd.utils.obstacle_editing import add_sphere_obstacle, add_box_obstacle, remove_fixed_obstacle_by_index
 from torch_robotics.torch_utils.seed import fix_random_seed
-from torch_robotics.torch_utils.torch_utils import get_torch_device, to_torch, to_numpy
+from torch_robotics.torch_utils.torch_utils import get_torch_device, to_numpy
 
 allow_ops_in_compiled_graph()
 
@@ -59,9 +63,13 @@ def experiment(
     # Visualization
     render_before_after: bool = True,
     render_denoising_video: bool = True,
+    render_denoising_gif: bool = False,
     render_joint_space_time_iters: bool = False,
     render_joint_space_env_iters: bool = False,
     render_env_robot_opt_iters: bool = True,
+    render_env_robot_opt_iters_gif: bool = False,
+    render_env_robot_trajectories: bool = False,
+    render_env_robot_trajectories_gif: bool = False,
     render_pybullet: bool = False,
     ########################################################################
     device: str = "cuda:0",
@@ -140,7 +148,6 @@ def experiment(
         debug=debug,
     )
 
-    ####################################################################################################################
     # Apply obstacle modifications (for replan mode)
     sdedit_cfg = args_inference.get("sdedit", DotMap())
     obstacle_mod = sdedit_cfg.get("obstacle_modification", None)
@@ -272,6 +279,7 @@ def experiment(
                 best_regen_path=default_best,
                 all_regen_paths=default_regen,
                 obstacle_modification=obstacle_mod if sdedit_mode == "replan" else None,
+                sdedit_mode=sdedit_mode,
                 title=f"SDEdit Re-planning (t_noise={default_noise})" if sdedit_mode == "replan"
                       else f"SDEdit Sketch→Path (t_noise={default_noise})",
                 save_path=os.path.join(results_dir, f"sdedit_before_after-{idx_sg:03d}.png"),
@@ -293,6 +301,7 @@ def experiment(
                     traj_pos_best=results_for_video.q_trajs_pos_best,
                     video_filepath=os.path.join(results_dir, f"sdedit_denoising-{idx_sg:03d}.mp4"),
                     anim_time=args_inference.trajectory_duration,
+                    make_gif=render_denoising_gif,
                 )
 
         # 3c. Single-panel result or noise-level comparison
@@ -333,6 +342,7 @@ def experiment(
         # 3d. Standard MPD-style denoising iteration rendering (from existing infrastructure)
         default_noise = sdedit_cfg.get("t_noise_level", noise_levels[0])
         if default_noise in results_by_noise_level:
+            make_robot_gif = render_env_robot_opt_iters_gif or render_env_robot_trajectories_gif
             render_results(
                 args_inference,
                 planning_task,
@@ -343,6 +353,8 @@ def experiment(
                 render_joint_space_time_iters=render_joint_space_time_iters,
                 render_joint_space_env_iters=render_joint_space_env_iters,
                 render_planning_env_robot_opt_iters=render_env_robot_opt_iters,
+                render_planning_env_robot_trajectories=render_env_robot_trajectories,
+                make_gif=make_robot_gif,
                 debug=debug,
             )
 

@@ -218,6 +218,7 @@ def render_results(
     render_joint_space_env_iters=False,
     render_planning_env_robot_opt_iters=False,
     render_planning_env_robot_trajectories=False,
+    make_gif=False,
     debug=False,
     **kwargs,
 ):
@@ -249,6 +250,7 @@ def render_results(
             video_filepath=os.path.join(results_dir, f"{base_file_name}-joint_space-time-opt-iters-{idx:03d}.mp4"),
             n_frames=max((2, len(results_single_plan.q_trajs_pos_iters))),
             anim_time=args_inference.trajectory_duration,
+            make_gif=make_gif,
             set_joint_limits=True,
             set_joint_vel_limits=True,
             set_joint_acc_limits=True,
@@ -273,6 +275,7 @@ def render_results(
                 ),
                 n_frames=max((2, len(results_single_plan.q_trajs_pos_iters))),
                 anim_time=args_inference.trajectory_duration,
+                make_gif=make_gif,
                 set_joint_limits=True,
                 set_joint_vel_limits=True,
                 set_joint_acc_limits=True,
@@ -290,25 +293,43 @@ def render_results(
             video_filepath=os.path.join(results_dir, f"{base_file_name}-joint_space-env-opt-iters-{idx:03d}.mp4"),
             n_frames=max((2, len(results_single_plan.q_trajs_pos_iters))),
             anim_time=args_inference.trajectory_duration,
+            make_gif=make_gif,
             filter_joint_limits_vel_acc=True,
         )
 
     if render_planning_env_robot_opt_iters:
+        robot_trajs_pos = results_single_plan.q_trajs_pos_iters
+        robot_control_points = results_single_plan.control_points_iters
+        robot_n_frames = max((2, len(results_single_plan.q_trajs_pos_iters)))
+        robot_anim_time = args_inference.trajectory_duration
+        robot_render_kwargs = dict(filter_joint_limits_vel_acc=True)
+
+        # Fast path for GIF export: reduce rendering load for high-DOF robots.
+        if make_gif:
+            robot_render_kwargs.update(
+                color_collisions=False,
+                max_trajs_render=1,
+                max_waypoints_render=12,
+            )
+            robot_n_frames = min(12, robot_n_frames)
+            robot_anim_time = min(4.0, robot_anim_time)
+
         # visualize in the planning environment
         planning_task.animate_opt_iters_robots(
-            trajs_pos=results_single_plan.q_trajs_pos_iters,
+            trajs_pos=robot_trajs_pos,
             start_state=q_pos_start,
             goal_state=q_pos_goal,
             traj_pos_best=results_single_plan.q_trajs_pos_best,
-            control_points=results_single_plan.control_points_iters,
+            control_points=robot_control_points,
             video_filepath=os.path.join(results_dir, f"{base_file_name}-robot-env-opt-iters-{idx:03d}.mp4"),
-            n_frames=max((2, len(results_single_plan.q_trajs_pos_iters))),
-            anim_time=args_inference.trajectory_duration,
-            filter_joint_limits_vel_acc=True,
+            n_frames=robot_n_frames,
+            anim_time=robot_anim_time,
+            make_gif=make_gif,
+            **robot_render_kwargs,
         )
 
         # reconstructed control points and trajectories at each diffusion iteration
-        if results_single_plan.q_trajs_pos_recon_iters is not None:
+        if results_single_plan.q_trajs_pos_recon_iters is not None and not make_gif:
             planning_task.animate_opt_iters_robots(
                 trajs_pos=results_single_plan.q_trajs_pos_recon_iters,
                 start_state=q_pos_start,
@@ -318,20 +339,40 @@ def render_results(
                 video_filepath=os.path.join(results_dir, f"{base_file_name}-robot-env-opt-iters-recon-{idx:03d}.mp4"),
                 n_frames=max((2, len(results_single_plan.q_trajs_pos_iters))),
                 anim_time=args_inference.trajectory_duration,
+                make_gif=make_gif,
                 filter_joint_limits_vel_acc=True,
             )
 
     if render_planning_env_robot_trajectories:
+        robot_trajs = results_single_plan.q_trajs_pos_iters[-1]
+        robot_traj_frames = max((2, robot_trajs.shape[1] // 10))
+        robot_traj_anim_time = args_inference.trajectory_duration
+        robot_traj_kwargs = dict(filter_joint_limits_vel_acc=True)
+        plot_x_trajs = True
+
+        if make_gif:
+            # Fast path for trajectory GIF replay: single trajectory and lighter overlays.
+            robot_trajs = robot_trajs[:1]
+            robot_traj_frames = min(24, max((2, robot_trajs.shape[1] // 5)))
+            robot_traj_anim_time = min(4.0, robot_traj_anim_time)
+            plot_x_trajs = False
+            robot_traj_kwargs.update(
+                color_collisions=False,
+                max_trajs_render=1,
+                max_waypoints_render=20,
+            )
+
         # visualize in the planning environment
         planning_task.animate_robot_trajectories(
-            q_pos_trajs=results_single_plan.q_trajs_pos_iters[-1],
+            q_pos_trajs=robot_trajs,
             q_pos_start=q_pos_start,
             q_pos_goal=q_pos_goal,
-            plot_x_trajs=True,
+            plot_x_trajs=plot_x_trajs,
             video_filepath=os.path.join(results_dir, f"{base_file_name}-robot-env-{idx:03d}.mp4"),
-            n_frames=max((2, results_single_plan.q_trajs_pos_iters[-1].shape[1] // 10)),
-            anim_time=args_inference.trajectory_duration,
-            filter_joint_limits_vel_acc=True,
+            n_frames=robot_traj_frames,
+            anim_time=robot_traj_anim_time,
+            make_gif=make_gif,
+            **robot_traj_kwargs,
         )
 
     if debug:

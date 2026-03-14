@@ -463,7 +463,15 @@ class PlanningTask(Task):
     ###############################################################################################################
     # Visualisation
     def render_robot_trajectories(
-        self, fig=None, ax=None, q_pos_trajs=None, q_pos_trajs_best=None, color_collisions=True, **kwargs
+        self,
+        fig=None,
+        ax=None,
+        q_pos_trajs=None,
+        q_pos_trajs_best=None,
+        color_collisions=True,
+        max_trajs_render=None,
+        max_waypoints_render=None,
+        **kwargs,
     ):
         if fig is None or ax is None:
             fig, ax = create_fig_and_axes(dim=self.env.dim)
@@ -479,7 +487,40 @@ class PlanningTask(Task):
                     kwargs["colors"].append(self.colors["collision"] if i in q_trajs_coll_idxs else self.colors["free"])
             else:
                 kwargs["colors"] = [self.colors["free"]] * len(q_pos_trajs)
-        self.robot.render_trajectories(ax, q_pos_trajs=q_pos_trajs, **kwargs)
+
+            q_pos_trajs_render = q_pos_trajs
+            colors_render = kwargs["colors"]
+
+            if max_trajs_render is not None and max_trajs_render > 0 and q_pos_trajs_render.shape[0] > max_trajs_render:
+                traj_idxs = np.round(
+                    np.linspace(0, q_pos_trajs_render.shape[0] - 1, int(max_trajs_render))
+                ).astype(int)
+                if torch.is_tensor(q_pos_trajs_render):
+                    traj_idxs_t = torch.as_tensor(traj_idxs, device=q_pos_trajs_render.device, dtype=torch.long)
+                    q_pos_trajs_render = q_pos_trajs_render.index_select(0, traj_idxs_t)
+                else:
+                    q_pos_trajs_render = q_pos_trajs_render[traj_idxs]
+                colors_render = [colors_render[i] for i in traj_idxs.tolist()]
+
+            if (
+                max_waypoints_render is not None
+                and max_waypoints_render > 0
+                and q_pos_trajs_render.shape[1] > max_waypoints_render
+            ):
+                wp_idxs = np.round(
+                    np.linspace(0, q_pos_trajs_render.shape[1] - 1, int(max_waypoints_render))
+                ).astype(int)
+                if torch.is_tensor(q_pos_trajs_render):
+                    wp_idxs_t = torch.as_tensor(wp_idxs, device=q_pos_trajs_render.device, dtype=torch.long)
+                    q_pos_trajs_render = q_pos_trajs_render.index_select(1, wp_idxs_t)
+                else:
+                    q_pos_trajs_render = q_pos_trajs_render[:, wp_idxs]
+
+            kwargs["colors"] = colors_render
+        else:
+            q_pos_trajs_render = q_pos_trajs
+
+        self.robot.render_trajectories(ax, q_pos_trajs=q_pos_trajs_render, **kwargs)
         if q_pos_trajs_best is not None:
             kwargs["colors"] = ["blue"]
             self.robot.render_trajectories(ax, q_pos_trajs=q_pos_trajs_best.unsqueeze(0), **kwargs)
@@ -526,7 +567,7 @@ class PlanningTask(Task):
             for q in qs:
                 self.robot.render(
                     ax,
-                    q_pos=q,
+                    q,
                     color=(
                         self.colors_robot["collision"]
                         if self.compute_collision(q, margin=0.0)

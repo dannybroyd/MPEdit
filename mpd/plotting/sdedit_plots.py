@@ -2,7 +2,7 @@
 Visualization utilities for SDEdit-style path regeneration results.
 
 Provides:
-  - plot_sdedit_before_after: 3-panel static figure (Before / Obstacle Edit / After)
+  - plot_sdedit_before_after: mode-aware before/after static figure
   - animate_sdedit_denoising: mp4 video of the SDEdit denoising process
   - plot_sdedit_results: single-panel result plot
   - plot_noise_level_comparison: side-by-side noise level comparison
@@ -20,7 +20,7 @@ from torch_robotics.visualizers.plot_utils import create_fig_and_axes, create_an
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3-panel Before / Obstacle Edit / After
+# Before/After figure (2 panels in sketch mode, 3 in replan mode)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_sdedit_before_after(
@@ -34,12 +34,20 @@ def plot_sdedit_before_after(
     title="SDEdit Re-planning",
     figsize=(24, 8),
     save_path=None,
+    sdedit_mode="replan",
+    env_before=None,
 ):
     """
-    Three-panel figure showing the full SDEdit story:
-      Panel 1 – BEFORE: original obstacle map + start/goal + valid input path
-      Panel 2 – OBSTACLE EDIT: the modified obstacle map (new/removed obstacle highlighted)
-      Panel 3 – AFTER: modified obstacle map + regenerated paths + best path
+    SDEdit summary figure.
+
+    Replan mode:
+      Panel 1 – BEFORE: original map + start/goal + valid reference path
+      Panel 2 – OBSTACLE EDIT: modified map (new/removed obstacle highlighted)
+      Panel 3 – AFTER: modified map + regenerated paths + best path
+
+    Sketch mode:
+      Panel 1 – BEFORE: original map + user sketch
+      Panel 2 – AFTER: original map + sketch + denoised/regenerated paths
 
     Uses planning_task.env.render(ax) for obstacle rendering (consistent with MPD visuals).
 
@@ -51,55 +59,83 @@ def plot_sdedit_before_after(
         best_regen_path: (N, state_dim) best regenerated path (optional)
         all_regen_paths: (n_samples, N, state_dim) all regenerated paths (optional)
         obstacle_modification: dict with keys 'type', 'center', 'radius' / 'sizes', 'index'
+        sdedit_mode: 'replan' or 'sketch'
+        env_before: optional environment snapshot to render in panel 1
         save_path: if set, saves the figure to this path
     """
-    env = planning_task.env
+    env_after = planning_task.env
+    env_before = env_before if env_before is not None else env_after
     robot = planning_task.robot
-    dim = env.dim
+    dim = env_after.dim
     ta = getattr(planning_task, "tensor_args", {"device": "cpu", "dtype": torch.float32})
 
+    is_sketch = sdedit_mode == "sketch"
+    panel_count = 2 if is_sketch else 3
+    panel_figsize = figsize if not (is_sketch and figsize == (24, 8)) else (16, 8)
+
     if dim >= 3:
-        fig = plt.figure(figsize=figsize)
-        ax_before = fig.add_subplot(1, 3, 1, projection="3d")
-        ax_edit   = fig.add_subplot(1, 3, 2, projection="3d")
-        ax_after  = fig.add_subplot(1, 3, 3, projection="3d")
-        axes = [ax_before, ax_edit, ax_after]
+        fig = plt.figure(figsize=panel_figsize)
+        if is_sketch:
+            ax_before = fig.add_subplot(1, 2, 1, projection="3d")
+            ax_after = fig.add_subplot(1, 2, 2, projection="3d")
+            axes = [ax_before, ax_after]
+        else:
+            ax_before = fig.add_subplot(1, 3, 1, projection="3d")
+            ax_edit = fig.add_subplot(1, 3, 2, projection="3d")
+            ax_after = fig.add_subplot(1, 3, 3, projection="3d")
+            axes = [ax_before, ax_edit, ax_after]
     else:
-        fig, axes = plt.subplots(1, 3, figsize=figsize)
-        ax_before, ax_edit, ax_after = axes
+        fig, axes_arr = plt.subplots(1, panel_count, figsize=panel_figsize)
+        axes = list(np.atleast_1d(axes_arr))
+        if is_sketch:
+            ax_before, ax_after = axes
+        else:
+            ax_before, ax_edit, ax_after = axes
 
     start_np = to_numpy(q_pos_start)
     goal_np  = to_numpy(q_pos_goal)
     input_np = to_numpy(input_path) if torch.is_tensor(input_path) else np.asarray(input_path)
 
     # ── Panel 1: BEFORE ──────────────────────────────────────────────────
-    ax_before.set_title("Before (original map + path)", fontsize=13)
-    _render_env_on_ax(ax_before, env, dim, draw_extra=False)
-    _draw_path(ax_before, input_np, robot=robot, env=env, tensor_args=ta,
-               color="blue", linewidth=2.5, label="Valid Path", zorder=5)
-    _draw_start_goal(ax_before, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
+    if is_sketch:
+        ax_before.set_title("Before (obstacle map + sketch)", fontsize=13)
+        before_path_label = "Sketch"
+    else:
+        ax_before.set_title("Before (original map + path)", fontsize=13)
+        before_path_label = "Valid Path"
+
+    _render_env_on_ax(ax_before, env_before, dim, draw_extra=True)
+    _draw_path(ax_before, input_np, robot=robot, env=env_before, tensor_args=ta,
+               color="blue", linewidth=2.5, label=before_path_label, zorder=5)
+    _draw_start_goal(ax_before, start_np, goal_np, robot, dim, env=env_before, tensor_args=ta)
     ax_before.legend(loc="upper left", fontsize=9)
 
-    # ── Panel 2: OBSTACLE EDIT ───────────────────────────────────────────
-    ax_edit.set_title("Obstacle map after edit", fontsize=13)
-    _render_env_on_ax(ax_edit, env, dim, draw_extra=True)
-    _draw_path(ax_edit, input_np, robot=robot, env=env, tensor_args=ta,
-               color="blue", linewidth=1.5, alpha=0.4, linestyle="--",
-               label="Old Path", zorder=4)
-    _draw_start_goal(ax_edit, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
-    _annotate_obstacle_mod(ax_edit, obstacle_modification)
-    ax_edit.legend(loc="upper left", fontsize=9)
+    # ── Panel 2: OBSTACLE EDIT (replan mode only) ────────────────────────
+    if not is_sketch:
+        ax_edit.set_title("Obstacle map after edit", fontsize=13)
+        _render_env_on_ax(ax_edit, env_after, dim, draw_extra=True)
+        _draw_path(ax_edit, input_np, robot=robot, env=env_after, tensor_args=ta,
+                   color="blue", linewidth=1.5, alpha=0.4, linestyle="--",
+                   label="Old Path", zorder=4)
+        _draw_start_goal(ax_edit, start_np, goal_np, robot, dim, env=env_after, tensor_args=ta)
+        _annotate_obstacle_mod(ax_edit, obstacle_modification)
+        ax_edit.legend(loc="upper left", fontsize=9)
 
-    # ── Panel 3: AFTER ───────────────────────────────────────────────────
-    ax_after.set_title("After SDEdit (regenerated paths)", fontsize=13)
-    _render_env_on_ax(ax_after, env, dim, draw_extra=True)
-    _draw_path(ax_after, input_np, robot=robot, env=env, tensor_args=ta,
+    # ── Panel 2/3: AFTER ─────────────────────────────────────────────────
+    if is_sketch:
+        ax_after.set_title("After (obstacle map + sketch + regenerated paths)", fontsize=13)
+        ref_label = "Sketch"
+    else:
+        ax_after.set_title("After SDEdit (regenerated paths)", fontsize=13)
+        ref_label = "Old Path"
+    _render_env_on_ax(ax_after, env_after, dim, draw_extra=True)
+    _draw_path(ax_after, input_np, robot=robot, env=env_after, tensor_args=ta,
                color="blue", linewidth=1.5, alpha=0.35, linestyle="--",
-               label="Old Path", zorder=4)
+               label=ref_label, zorder=4)
 
     if all_regen_paths is not None:
         regen_np = to_numpy(all_regen_paths) if torch.is_tensor(all_regen_paths) else np.asarray(all_regen_paths)
-        if _needs_fk(regen_np, env) and _is_3d_ax(ax_after):
+        if _needs_fk(regen_np, env_after) and _is_3d_ax(ax_after):
             regen_ts = _batch_paths_to_taskspace(regen_np, robot, ta)
         else:
             regen_ts = regen_np
@@ -113,10 +149,10 @@ def plot_sdedit_before_after(
 
     if best_regen_path is not None:
         best_np = to_numpy(best_regen_path) if torch.is_tensor(best_regen_path) else np.asarray(best_regen_path)
-        _draw_path(ax_after, best_np, robot=robot, env=env, tensor_args=ta,
-                   color="green", linewidth=2.5, label="Best Regenerated", zorder=6)
+        _draw_path(ax_after, best_np, robot=robot, env=env_after, tensor_args=ta,
+                   color="green", linewidth=2.5, label="Shortest Regenerated", zorder=6)
 
-    _draw_start_goal(ax_after, start_np, goal_np, robot, dim, env=env, tensor_args=ta)
+    _draw_start_goal(ax_after, start_np, goal_np, robot, dim, env=env_after, tensor_args=ta)
     ax_after.legend(loc="upper left", fontsize=9)
 
     plt.suptitle(title, fontsize=15, y=1.01)
@@ -141,6 +177,8 @@ def animate_sdedit_denoising(
     video_filepath="sdedit_denoising.mp4",
     n_frames=None,
     anim_time=5.0,
+    make_gif=False,
+    gif_filepath=None,
 ):
     """
     Create an mp4 video showing the SDEdit denoising process frame by frame,
@@ -158,6 +196,8 @@ def animate_sdedit_denoising(
         video_filepath: output .mp4 path
         n_frames: number of frames in the video (defaults to S)
         anim_time: video duration in seconds
+        make_gif: if True, also saves a .gif animation
+        gif_filepath: optional output .gif path (defaults to video path with .gif extension)
     """
     env = planning_task.env
     robot = planning_task.robot
@@ -242,7 +282,10 @@ def animate_sdedit_denoising(
 
     create_animation_video(
         fig, animate_fn, n_frames=n_frames, fargs=(ax,),
-        anim_time=anim_time, video_filepath=video_filepath,
+        anim_time=anim_time,
+        video_filepath=video_filepath,
+        make_gif=make_gif,
+        gif_filepath=gif_filepath,
     )
     plt.close(fig)
 
@@ -295,7 +338,7 @@ def plot_sdedit_results(
     if best_path is not None:
         best_np = to_numpy(best_path) if torch.is_tensor(best_path) else best_path
         _draw_path(ax, best_np, robot=robot, env=env, tensor_args=ta,
-                   color='green', linewidth=2.5, label='Best Regenerated', zorder=6)
+                   color='green', linewidth=2.5, label='Shortest Regenerated', zorder=6)
 
     start_np = to_numpy(q_pos_start) if torch.is_tensor(q_pos_start) else q_pos_start
     goal_np = to_numpy(q_pos_goal) if torch.is_tensor(q_pos_goal) else q_pos_goal
@@ -465,12 +508,17 @@ def _point_to_taskspace(point_np, robot, tensor_args):
 
 def _render_env_on_ax(ax, env, dim, draw_extra=True):
     """Render environment obstacles using the existing env.render infrastructure."""
+    render_extra_as_fixed_color = bool(getattr(env, "render_extra_as_fixed_color", False))
+
     if env.obj_fixed_list:
         for obj in env.obj_fixed_list:
             obj.render(ax)
     if draw_extra and env.obj_extra_list:
         for obj in env.obj_extra_list:
-            obj.render(ax, color="red", cmap="Reds")
+            if render_extra_as_fixed_color:
+                obj.render(ax)
+            else:
+                obj.render(ax, color="red", cmap="Reds")
 
     ax.set_xlim(env.limits_np[0][0], env.limits_np[1][0])
     ax.set_ylim(env.limits_np[0][1], env.limits_np[1][1])
