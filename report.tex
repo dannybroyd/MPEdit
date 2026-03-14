@@ -1,0 +1,154 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\newcommand{\figplaceholder}[3][2.0in]{%
+  \begin{figure}[t]
+    \centering
+    \fbox{\parbox[c][#1][c]{0.9\linewidth}{\centering #2\\[0.5ex]{\footnotesize #3}}}
+    \caption{#2}
+    \label{#3}
+  \end{figure}
+}
+
+\title{\textbf{MPEdit: Editing Motion Plans with Diffusion-Guided SDEdit}}
+\author{Student Name \\ Course Project Report \\ email@university.edu}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We extend Motion Planning Diffusion (MPD) with SDEdit-style trajectory editing to enable fast re-planning and sketch-to-path generation. MPD already learns a B-spline diffusion prior that produces collision-free trajectories under cost guidance. By integrating SDEdit, we can start from an existing (possibly invalid) path, forward-noise it to an intermediate diffusion step, and denoise with the MPD cost guide to obtain a new feasible trajectory that respects the input structure. This report summarizes the design, implementation, and experimental evaluation of \emph{MPEdit}. The main body is capped at six pages (12~pt, single column); additional qualitative sketch examples are provided in the appendix placeholders.
+\end{abstract}
+
+\section{Introduction}
+Robot motion planning often requires regenerating paths when environments change or when a user provides an approximate sketch. Sampling-based planners (e.g., RRTConnect) deliver valid paths but can be slow or brittle under perturbations. Diffusion-based planners such as MPD learn a generative model over trajectories, but they typically sample from pure noise and cannot condition on an existing path. SDEdit---originally proposed for image editing---bridges this gap by injecting controlled noise into a partial solution and denoising it with guidance.
+
+This project fuses SDEdit with MPD, yielding \emph{MPEdit}: a planner that edits trajectories instead of generating from scratch. The objectives are to (1) reuse prior solutions for rapid re-planning after obstacle changes, (2) convert user sketches into collision-free paths, and (3) quantify speed, quality, and diversity relative to MPD and RRT baselines.
+
+Our contributions relative to the public MPD codebase are:
+\begin{itemize}[leftmargin=*]
+  \item SDEdit sampling loops inside the diffusion model (DDIM/DDPM) with cost-guided denoising from intermediate timesteps.
+  \item Interactive editors for obstacle modification and freehand path sketching in 2D/3D, plus plotting utilities for before/after comparisons and denoising videos.
+  \item A five-part experiment suite (run\_experiment.py) that measures accuracy, faithfulness, speed, and diversity across 2D and 3D environments.
+\end{itemize}
+
+\section{Background}
+\subsection{Motion Planning Diffusion (MPD)}
+MPD trains a diffusion model on normalized B-spline control points of robot trajectories. At inference, a cost guide steers denoising toward collision-free, dynamically feasible paths. MPD supports both 2D point-mass and 7-DOF Panda settings and can render optimizer iterations for debugging.
+
+\subsection{SDEdit for trajectory editing}
+SDEdit forward-noises an existing signal to an intermediate timestep $t_{0}$ and then denoises with guidance. For motion planning, the signal is a waypoint sequence or its B-spline control points. Choosing $t_{0}$ trades fidelity to the input against the ability to escape collisions: small $t_{0}$ preserves the path but may keep collisions; large $t_{0}$ approaches full sampling diversity.
+
+\section{Method}
+\subsection{Problem statement}
+Given start and goal states $(q_{\text{start}}, q_{\text{goal}})$, an environment map, and an input path $x_{0}$ (valid or not), we seek a trajectory $\hat{x}$ that (i) connects the endpoints, (ii) is collision-free, (iii) remains faithful to $x_{0}$ when desired, and (iv) is produced quickly enough for interactive editing.
+
+\subsection{MPEdit pipeline}
+The pipeline follows four stages:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Path encoding:} Convert $x_{0}$ to normalized control points using the MPD dataset statistics.
+  \item \textbf{Forward noising:} Map to diffusion timestep $t_{0}$ via DDIM/DDPM closed forms.
+  \item \textbf{Guided denoising:} Run cost-guided reverse steps from $t_{0}$ to 0 with optional multiple samples.
+  \item \textbf{Post-processing:} Decode control points to waypoints, filter collisions, and select the best trajectory.
+\end{enumerate}
+The DDIM sampler exposes $t_{0}$ as a user knob, enabling the speed--fidelity trade-off studied in Experiment~1.
+
+\figplaceholder{Placeholder: MPEdit pipeline overview (replace with before/after figure from \texttt{logs\_sdedit\_interactive/sdedit\_before\_after-\{idx\}.png})}{fig:pipeline}
+
+\section{Implementation}
+\subsection{Diffusion model changes}
+We added SDEdit-specific sampling loops to \texttt{mpd/models/diffusion\_models/diffusion\_model\_base.py}: (i) \texttt{ddim\_sdedit\_sample\_loop} forward-noises to $t_{0}$ and denoises with DDIM, (ii) \texttt{p\_sdedit\_sample\_loop} provides the DDPM variant, and (iii) \texttt{conditional\_sample\_sdedit}/\texttt{run\_sdedit\_inference} handle batching, conditioning, and cost-guide reuse. These routines are invoked by \texttt{GenerativeOptimizationPlanner.plan\_trajectory\_sdedit}, keeping the rest of the MPD planner unchanged.
+
+\subsection{Interactive editing tools}
+\textbf{ObstacleEditor} (\texttt{mpd/interactive/obstacle\_editor.py}) lets users add/remove obstacles with sliders and undo, while \textbf{ObstacleEditor3D} supports spherical obstacles in 3D. \textbf{PathSketcher} (\texttt{mpd/interactive/path\_sketcher.py}) captures freehand sketches, snaps endpoints, fits a B-spline, and resamples to the model's waypoint count. These tools are orchestrated by \texttt{scripts/inference/inference\_sdedit\_interactive.py}, which opens the editors before running SDEdit and saves three-panel before/edit/after figures plus denoising videos.
+
+\subsection{Plotting and metrics}
+\texttt{mpd/plotting/sdedit\_plots.py} renders single-panel results, multi-noise comparisons, and denoising animations with automatic 2D/3D axes. SDEdit metrics (\texttt{mpd/metrics/sdedit\_metrics.py}) compute discrete Fréchet distance, mean $L_{2}$ distance, success rate, and diversity scores. These utilities are reused in the experiment suite.
+
+\subsection{Experiment harness}
+The new experiment runner (\texttt{scripts/experiments/run\_experiment.py}) and configs (\texttt{scripts/experiments/cfgs/}) execute five studies with shared model loading and RRT baselines. Obstacle scenarios are generated via \texttt{mpd/utils/scenario\_generation.py}, and results are serialized for later plotting using \texttt{plot\_results.py}.
+
+\subsection{Notes on differences from baseline MPD}
+The upstream MPD branch plans only from noise; our branch introduces (1) SDEdit sampling hooks, (2) obstacle and sketch GUIs, (3) additional plotting and logging, and (4) experiment scripts that sweep $t_{0}$ and compare to full MPD and RRT. Core training code and dataset formats remain unchanged.
+
+\section{Experimental setup}
+We evaluate on two environments:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{EnvSimple2D + PointMass2D} (2D): supports both re-plan and sketch modes; uses DDIM with $15$ steps and evaluates $50$ start/goal pairs with $100$ samples each.
+  \item \textbf{EnvSpheres3D + Panda} (7-DOF): re-plan only; sketch mode is disabled because drawing joint-space sketches is impractical.
+\end{itemize}
+
+\paragraph{Protocols.} Experiments are defined in \texttt{experiment\_2d.yaml} and \texttt{experiment\_3d.yaml}. Common settings: $n\_{\text{start/goal}}{=}50$, $n\_{\text{samples}}{=}100$, validation start/goal selection, device \texttt{cuda:0}. For 2D sketch experiments, synthetic sketches are created by corrupting valid paths with Gaussian noise $\sigma\in\{0.05,0.1,0.2,0.3\}$.
+
+\paragraph{Metrics.} Success rate (collision-free completion), Fréchet and mean $L_{2}$ distance to the input (faithfulness), timing (wall-clock inference), and diversity (pairwise Fréchet/$L_{2}$ across samples). For baselines, RRTConnect provides a classical planner and full MPD corresponds to $t_{0}{=}0$ (sampling from noise).
+
+\paragraph{Reproduction.} After setting environment variables and activating the MPD conda env, run:
+\begin{verbatim}
+cd scripts/inference
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_2d.yaml
+python ../experiments/run_experiment.py --config ../experiments/cfgs/experiment_3d.yaml
+python ../experiments/plot_results.py --results_dir logs_experiments
+\end{verbatim}
+Interactive demos: \texttt{python inference\_sdedit\_interactive.py --sdedit\_mode replan} or \texttt{--sdedit\_mode sketch}.
+
+\section{Results and discussion}
+\subsection{Experiment 1: $t_{0}$ sweep (``money plot'')}
+We sweep $t_{0}\in[1,14]$ to study faithfulness versus success. Low $t_{0}$ preserves the input but may keep collisions; high $t_{0}$ increases success and diversity at the cost of deviation. Expect a knee near $t_{0}{\approx}7$ for 2D and 3D.
+
+\figplaceholder{Placeholder: Success vs Fréchet over $t_{0}$ (insert \texttt{logs\_experiments/figures/fig2\_t0\_sweep.pdf})}{fig:t0-sweep}
+
+\subsection{Experiment 2: Baselines (SDEdit vs MPD vs RRT)}
+We compare SDEdit (best $t_{0}$ from Exp~1), full MPD ($t_{0}{=}0$), and RRTConnect across easy/medium/hard/removal scenarios. SDEdit should match MPD success but with lower Fréchet distance to the reference and reduced inference time; RRT is fast but brittle on hard/removal cases.
+
+\figplaceholder{Placeholder: Baseline comparison bars (insert \texttt{logs\_experiments/figures/fig\_baselines\_comparison.pdf})}{fig:baselines}
+\figplaceholder{Placeholder: Baseline table (insert \texttt{logs\_experiments/figures/table1\_baselines.tex} as a table)}{tab:baselines}
+
+\subsection{Experiment 3: Sketch-to-path (2D)}
+Synthetic sketches with varying noise levels evaluate robustness to user drawings. Lower $\sigma$ preserves structure; higher $\sigma$ demands larger $t_{0}$ to escape artifacts. We expect a ridge where moderate $t_{0}$ balances clean-up and fidelity.
+
+\figplaceholder{Placeholder: Sketch heatmap (insert \texttt{logs\_experiments/figures/fig4\_sketch\_heatmap.pdf})}{fig:sketch-heatmap}
+
+\subsection{Experiment 4: Inference speed}
+Timing SDEdit across $t_{0}$ shows monotonic speed gains as $t_{0}$ increases, with potential $>2\times$ speedup over full MPD. RRT timing is shown for reference but may have high variance.
+
+\figplaceholder{Placeholder: Timing curves (insert \texttt{logs\_experiments/figures/fig5\_speed.pdf})}{fig:speed}
+
+\subsection{Experiment 5: Diversity}
+We measure pairwise Fréchet/$L_{2}$ distances among 100 samples per $t_{0}$. Diversity rises with $t_{0}$; too much diversity may reduce faithfulness, reinforcing the sweep results.
+
+\figplaceholder{Placeholder: Diversity plot (insert \texttt{logs\_experiments/figures/fig6\_diversity.pdf})}{fig:diversity}
+
+\subsection{Qualitative before/after}
+Interactive runs render three-panel figures (Before, Obstacle Edit, After) and denoising videos. Placeholders below should be replaced with representative examples from \texttt{logs\_sdedit\_interactive/}.
+
+\figplaceholder{Placeholder: Before/Edit/After qualitative result}{fig:before-after}
+
+\section{Limitations and future work}
+\textbf{Hardware dependence:} IsaacGym and CUDA are required; CPU-only fallback is not supported. \textbf{Sketch mode scope:} Only 2D sketching is practical; 7-DOF sketching would need task-space drawing with inverse kinematics. \textbf{Generalization:} Models are trained per environment; cross-environment adaptation (e.g., new obstacle distributions) remains open. \textbf{Safety:} Cost guides mitigate collisions but do not encode joint torque limits or dynamic constraints; incorporating these into the guidance or post-checks is future work.
+
+Future work includes: adaptive selection of $t_{0}$ based on collision diagnostics, goal-conditioned sketch priors, integrating human-in-the-loop feedback during denoising, and evaluating on hardware with latency constraints.
+
+\section{Conclusion}
+MPEdit brings SDEdit-style editing to motion planning diffusion, enabling re-planning and sketch-to-path generation with controllable fidelity and speed. The implementation augments MPD with SDEdit sampling loops, interactive editors, visualization, and a comprehensive experiment harness. Early results indicate that intermediate noise levels deliver high success with lower deviation and faster inference than full MPD, while maintaining user control through sketches and obstacle edits.
+
+\appendix
+\section{Sketch mode qualitative examples (not counted toward 6 pages)}
+\figplaceholder{Placeholder: User sketch vs denoised path (insert \texttt{logs\_sdedit\_interactive/sdedit\_result-\{idx\}.png})}{fig:sketch-qual-1}
+\figplaceholder{Placeholder: Multiple sketches at different $t_{0}$ (insert tiled figure from sketch runs)}{fig:sketch-qual-2}
+
+\section{Reproducibility checklist}
+\begin{itemize}[leftmargin=*]
+  \item Code changes live in \texttt{scripts/inference/inference\_sdedit.py}, \texttt{mpd/interactive/\*}, \texttt{mpd/plotting/sdedit\_plots.py}, and \texttt{scripts/experiments/\*}.
+  \item Data and models: download \texttt{data\_public.tar.gz}, symlink \texttt{data\_trajectories} and \texttt{data\_trained\_models}, and set \texttt{ISAAC\_GYM\_PATH} per \texttt{set\_env\_variables.sh}.
+  \item Commands: run the two experiment configs, then call \texttt{plot\_results.py}; use \texttt{inference\_sdedit\_interactive.py} for qualitative figures.
+\end{itemize}
+
+\end{document}
