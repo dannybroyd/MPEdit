@@ -152,6 +152,16 @@ def sync_ompl_worker_with_planning_env(evaluation_samples_generator, planning_en
     worker.add_obstacles()
 
 
+def check_start_goal_validity(evaluation_samples_generator, q_pos_start, q_pos_goal):
+    """
+    Check whether start/goal states are valid in the OMPL worker's current world.
+    """
+    pbompl = evaluation_samples_generator.generate_data_ompl_worker.pbompl_interface
+    start_valid = pbompl.is_state_valid(to_numpy(q_pos_start), check_bounds=True)
+    goal_valid = pbompl.is_state_valid(to_numpy(q_pos_goal), check_bounds=True)
+    return start_valid, goal_valid
+
+
 def get_start_goal_and_reference_path(
     evaluation_samples_generator, idx, args_inference, tensor_args, planning_env,
 ):
@@ -177,6 +187,7 @@ def get_start_goal_and_reference_path(
         planner_allowed_time=10.0,
         interpolate_num=args_inference.num_T_pts,
         simplify_path=True,
+        max_tries=3,
     )
 
     if results_plan_d is None or len(results_plan_d) == 0 or results_plan_d[0].get("sol_path") is None:
@@ -246,12 +257,23 @@ def run_rrt_replan(
     q_pos_start_np = to_numpy(q_pos_start, dtype=np.float64)
     q_pos_goal_np = to_numpy(q_pos_goal, dtype=np.float64)
 
+    start_valid, goal_valid = check_start_goal_validity(
+        evaluation_samples_generator, q_pos_start_np, q_pos_goal_np
+    )
+    if not start_valid or not goal_valid:
+        print(
+            f"Info:    RRTConnect re-plan skipped due invalid start/goal "
+            f"(start_valid={start_valid}, goal_valid={goal_valid})"
+        )
+        return None, 0.0
+
     t_start = time.perf_counter()
     results_plan_d = evaluation_samples_generator.generate_data_ompl_worker.run(
         1, q_pos_start_np, q_pos_goal_np,
         planner_allowed_time=allowed_time,
         interpolate_num=args_inference.num_T_pts,
         simplify_path=True,
+        max_tries=1,
     )
     t_elapsed = time.perf_counter() - t_start
 
@@ -290,6 +312,11 @@ def run_exp1_t0_sweep(
     noise_levels = cfg.noise_levels
     n_pairs = exp_cfg.common.n_start_goal_pairs
     rng = np.random.default_rng(exp_cfg.seed)
+    require_rrt_feasible = cfg.get("require_rrt_feasible", planning_task.env.dim >= 3)
+    max_obstacle_sampling_attempts = int(
+        cfg.get("max_obstacle_sampling_attempts", 20 if planning_task.env.dim >= 3 else 5)
+    )
+    rrt_feasibility_time = float(cfg.get("rrt_feasibility_time", 8.0 if planning_task.env.dim >= 3 else 5.0))
 
     all_results = {t: [] for t in noise_levels}
 
@@ -305,13 +332,54 @@ def run_exp1_t0_sweep(
             continue
         q_pos_start, q_pos_goal, ee_pose_goal, reference_path = sample
 
-        # Apply obstacle modification
-        reset_obstacle_modifications(planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot)
-        modifications = generate_obstacle_scenario(
-            planning_task.env, reference_path, cfg.obstacle_difficulty, rng=rng,
-        )
-        apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
-        rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+        # Apply obstacle modification (optionally enforce RRT feasibility in the modified map)
+        sampled_feasible_modification = False
+        for attempt in range(max_obstacle_sampling_attempts):
+            reset_obstacle_modifications(planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot)
+            modifications = generate_obstacle_scenario(
+                planning_task.env, reference_path, cfg.obstacle_difficulty, rng=rng,
+                robot=planning_task.robot, tensor_args=tensor_args,
+            )
+            apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
+            rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+
+            # Reject scenarios that invalidate the fixed start/goal pair.
+            sync_ompl_worker_with_planning_env(eval_gen, planning_task.env)
+            start_valid, goal_valid = check_start_goal_validity(
+                eval_gen, q_pos_start, q_pos_goal
+            )
+            if not start_valid or not goal_valid:
+                print(
+                    f"  Obstacle scenario invalidates start/goal "
+                    f"(start_valid={start_valid}, goal_valid={goal_valid}). Resampling..."
+                )
+                continue
+
+            if not require_rrt_feasible:
+                sampled_feasible_modification = True
+                break
+
+            rrt_path_check, _ = run_rrt_replan(
+                eval_gen, q_pos_start, q_pos_goal, args_inference, planning_task.env,
+                allowed_time=rrt_feasibility_time,
+            )
+            if rrt_path_check is not None:
+                sampled_feasible_modification = True
+                break
+
+            print(
+                f"  Obstacle scenario infeasible for RRT replan "
+                f"(attempt {attempt + 1}/{max_obstacle_sampling_attempts}). Resampling..."
+            )
+
+        if not sampled_feasible_modification:
+            print(
+                "  Could not sample a feasible obstacle scenario after "
+                f"{max_obstacle_sampling_attempts} attempts. Skipping pair."
+            )
+            reset_obstacle_modifications(planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot)
+            rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+            continue
 
         for t_noise in noise_levels:
             print(f"  t_noise={t_noise}", end=" ", flush=True)
@@ -388,6 +456,9 @@ def run_exp2_baselines(
     scenarios = cfg.scenarios
     n_pairs = exp_cfg.common.n_start_goal_pairs
     rng = np.random.default_rng(exp_cfg.seed + 100)
+    max_obstacle_sampling_attempts = int(
+        cfg.get("max_obstacle_sampling_attempts", 12 if planning_task.env.dim >= 3 else 3)
+    )
 
     all_results = {scenario: {"sdedit": [], "full_mpd": [], "rrt": []} for scenario in scenarios}
 
@@ -408,12 +479,41 @@ def run_exp2_baselines(
             q_pos_start, q_pos_goal, ee_pose_goal, reference_path = sample
 
             # Apply obstacle modifications for this scenario
-            reset_obstacle_modifications(planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot)
-            modifications = generate_obstacle_scenario(
-                planning_task.env, reference_path, scenario, rng=rng,
-            )
-            apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
-            rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+            sampled_valid_modification = False
+            for attempt in range(max_obstacle_sampling_attempts):
+                reset_obstacle_modifications(
+                    planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot
+                )
+                modifications = generate_obstacle_scenario(
+                    planning_task.env, reference_path, scenario, rng=rng,
+                    robot=planning_task.robot, tensor_args=tensor_args,
+                )
+                apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
+                rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+
+                # Avoid benchmarking methods on impossible endpoint constraints.
+                sync_ompl_worker_with_planning_env(eval_gen, planning_task.env)
+                start_valid, goal_valid = check_start_goal_validity(eval_gen, q_pos_start, q_pos_goal)
+                if start_valid and goal_valid:
+                    sampled_valid_modification = True
+                    break
+
+                print(
+                    f"    Obstacle scenario invalidates start/goal "
+                    f"(start_valid={start_valid}, goal_valid={goal_valid}) "
+                    f"[attempt {attempt + 1}/{max_obstacle_sampling_attempts}]. Resampling..."
+                )
+
+            if not sampled_valid_modification:
+                print(
+                    f"    Could not sample a valid obstacle scenario after "
+                    f"{max_obstacle_sampling_attempts} attempts. Skipping pair."
+                )
+                reset_obstacle_modifications(
+                    planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot
+                )
+                rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
+                continue
 
             # ── Method 1: SDEdit ──
             print(f"    SDEdit (t={cfg.sdedit_noise_level})...", end=" ", flush=True)
@@ -671,6 +771,7 @@ def run_exp4_speed(
     modifications = generate_obstacle_scenario(
         planning_task.env, reference_path, "medium",
         rng=np.random.default_rng(exp_cfg.seed + 300),
+        robot=planning_task.robot, tensor_args=tensor_args,
     )
     apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
     rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
@@ -799,6 +900,7 @@ def run_exp5_diversity(
         reset_obstacle_modifications(planning_task.env, tensor_args, fixed_snapshot=fixed_obstacles_snapshot)
         modifications = generate_obstacle_scenario(
             planning_task.env, reference_path, cfg.get("obstacle_difficulty", "medium"), rng=rng,
+            robot=planning_task.robot, tensor_args=tensor_args,
         )
         apply_obstacle_modifications(planning_task.env, modifications, tensor_args)
         rebuild_cost_guide(planner, planning_task, train_subset, args_inference, tensor_args)
@@ -860,15 +962,19 @@ def main():
         help="Run only a specific experiment: exp1, exp2, exp3, exp4, exp5",
     )
     parser.add_argument(
-        "--results_dir", type=str, default="logs_experiments",
-        help="Base directory for experiment results",
+        "--results_dir", type=str, default=None,
+        help=(
+            "Base directory for experiment results. "
+            "If omitted, uses config key `results_dir` when present, "
+            "otherwise falls back to 'logs_experiments'."
+        ),
     )
     args = parser.parse_args()
 
     exp_cfg = load_experiment_config(args.config)
     fix_random_seed(exp_cfg.seed)
 
-    results_dir = args.results_dir
+    results_dir = args.results_dir or exp_cfg.get("results_dir", "logs_experiments")
     os.makedirs(results_dir, exist_ok=True)
 
     print(f"\n{'='*80}")

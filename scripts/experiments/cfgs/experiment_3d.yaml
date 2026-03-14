@@ -9,6 +9,9 @@ base_inference_config: './cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml'
 # Random seed for reproducibility
 seed: 42
 
+# Keep 3D outputs separate from 2D outputs by default
+results_dir: 'logs_experiments_3d'
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Common settings
 # ─────────────────────────────────────────────────────────────────────────────

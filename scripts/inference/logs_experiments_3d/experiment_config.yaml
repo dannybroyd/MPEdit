@@ -1,0 +1,69 @@
+base_inference_config: ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml
+common:
+  device: cuda:0
+  n_start_goal_pairs: 50
+  n_trajectory_samples: 100
+  selection_start_goal: validation
+exp1_t0_sweep:
+  enabled: true
+  noise_levels:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  obstacle_difficulty: medium
+  results_subdir: exp1_t0_sweep
+exp2_baselines:
+  enabled: true
+  full_mpd_noise_level: 0
+  results_subdir: exp2_baselines
+  rrt_allowed_time: 10.0
+  scenarios:
+  - easy
+  - medium
+  - hard
+  - removal
+  sdedit_noise_level: 7
+exp3_sketch:
+  enabled: false
+exp4_speed:
+  enabled: true
+  n_timing_runs: 50
+  noise_levels:
+  - 1
+  - 3
+  - 5
+  - 7
+  - 9
+  - 11
+  - 13
+  results_subdir: exp4_speed
+  rrt_allowed_time: 10.0
+  time_full_mpd: true
+  time_rrt: true
+exp5_diversity:
+  enabled: true
+  n_start_goal_pairs: 10
+  n_trajectory_samples: 100
+  noise_levels:
+  - 1
+  - 3
+  - 5
+  - 7
+  - 9
+  - 11
+  - 13
+  obstacle_difficulty: medium
+  results_subdir: exp5_diversity
+results_dir: logs_experiments_3d
+seed: 42

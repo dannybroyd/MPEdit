@@ -9,6 +9,9 @@ base_inference_config: './cfgs/config_EnvSimple2D-RobotPointMass2D_sdedit.yaml'
 # Random seed for reproducibility
 seed: 42
 
+# Keep 2D outputs separate from 3D outputs by default
+results_dir: 'logs_experiments_2d'
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Common settings
 # ─────────────────────────────────────────────────────────────────────────────

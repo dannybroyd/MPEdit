@@ -23,6 +23,8 @@ def generate_obstacle_scenario(
     difficulty,
     rng=None,
     dim=None,
+    robot=None,
+    tensor_args=None,
 ):
     """
     Generate obstacle modifications for a given difficulty level.
@@ -48,33 +50,112 @@ def generate_obstacle_scenario(
     if dim is None:
         dim = env.dim
 
-    path_np = to_numpy(reference_path) if torch.is_tensor(reference_path) else np.asarray(reference_path)
-    # Use only position dims (for high-DOF robots, path_np might be in joint space)
+    path_np = _path_to_obstacle_space(
+        reference_path,
+        env_dim=dim,
+        robot=robot,
+        tensor_args=tensor_args,
+    )
     state_dim = path_np.shape[-1]
 
     env_limits = to_numpy(env.limits) if torch.is_tensor(env.limits) else np.asarray(env.limits)
     env_min = env_limits[0][:state_dim]
     env_max = env_limits[1][:state_dim]
     env_range = env_max - env_min
+    nominal_radius = _estimate_nominal_obstacle_radius(env, env_range)
 
     if difficulty == "easy":
-        return _generate_easy_scenario(path_np, state_dim, env_min, env_max, env_range, rng)
+        return _generate_easy_scenario(
+            path_np, state_dim, env_min, env_max, env_range, rng, dim, nominal_radius
+        )
     elif difficulty == "medium":
-        return _generate_medium_scenario(path_np, state_dim, env_min, env_max, env_range, rng)
+        return _generate_medium_scenario(
+            path_np, state_dim, env_min, env_max, env_range, rng, dim, nominal_radius
+        )
     elif difficulty == "hard":
-        return _generate_hard_scenario(path_np, state_dim, env_min, env_max, env_range, rng)
+        return _generate_hard_scenario(
+            path_np, state_dim, env_min, env_max, env_range, rng, dim, nominal_radius
+        )
     elif difficulty == "removal":
         return _generate_removal_scenario(env, rng)
     else:
         raise ValueError(f"Unknown difficulty: {difficulty}. Use 'easy', 'medium', 'hard', or 'removal'.")
 
 
-def _generate_easy_scenario(path_np, state_dim, env_min, env_max, env_range, rng):
+def _path_to_obstacle_space(path, env_dim, robot=None, tensor_args=None):
+    """
+    Convert a planning path to obstacle-space coordinates (env_dim).
+
+    For high-DOF robots (e.g., Panda 7D joint-space paths in a 3D environment),
+    this maps the path to task space via robot FK before obstacle placement.
+    """
+    path_np = to_numpy(path) if torch.is_tensor(path) else np.asarray(path, dtype=np.float64)
+    if path_np.ndim != 2:
+        raise ValueError(f"Expected path shape (N, D), got {path_np.shape}")
+
+    # Already in obstacle space (2D/3D)
+    if path_np.shape[-1] == env_dim:
+        return path_np
+
+    # High-DOF path requires FK to map to task space
+    if path_np.shape[-1] > env_dim:
+        if robot is None:
+            raise ValueError(
+                f"Path has dim {path_np.shape[-1]} but env_dim is {env_dim}. "
+                f"Pass robot=... so FK can map joint-space path to obstacle space."
+            )
+
+        ta = tensor_args or {"device": "cpu", "dtype": torch.float32}
+        q = torch.as_tensor(path_np, device=ta.get("device", "cpu"), dtype=ta.get("dtype", torch.float32))
+        if q.dim() == 2:
+            q = q.unsqueeze(0)  # (1, N, q_dim)
+
+        fk = robot.fk_map_collision(q)
+        fk_np = to_numpy(fk)
+
+        # Typical shape: (1, N, n_links, 3)
+        if fk_np.ndim == 4:
+            fk_np = fk_np.squeeze(0)  # (N, n_links, 3)
+        if fk_np.ndim == 3:
+            # End-effector position
+            return fk_np[:, -1, :env_dim]
+        if fk_np.ndim == 2:
+            return fk_np[:, :env_dim]
+
+        raise ValueError(f"Unexpected FK output shape: {fk_np.shape}")
+
+    raise ValueError(
+        f"Path dim {path_np.shape[-1]} is smaller than env_dim {env_dim}; cannot place obstacles."
+    )
+
+
+def _estimate_nominal_obstacle_radius(env, env_range):
+    """
+    Estimate a representative obstacle radius from fixed obstacles in the env.
+    Falls back to a fraction of workspace range if radii are unavailable.
+    """
+    radii = []
+    for obj in getattr(env, "obj_fixed_list", []):
+        for primitive in getattr(obj, "fields", []):
+            if hasattr(primitive, "radii"):
+                r = to_numpy(primitive.radii) if torch.is_tensor(primitive.radii) else np.asarray(primitive.radii)
+                radii.extend(np.asarray(r, dtype=np.float64).reshape(-1).tolist())
+
+    if radii:
+        return float(np.median(radii))
+
+    return float(0.05 * np.mean(env_range))
+
+
+def _generate_easy_scenario(path_np, state_dim, env_min, env_max, env_range, rng, env_dim, nominal_radius):
     """
     Easy: 1 small obstacle added AWAY from the path (minor detour needed).
     Place obstacle offset from the path midpoint by 1-2 radii.
     """
-    radius = float(rng.uniform(0.05, 0.10) * np.mean(env_range))
+    if env_dim >= 3:
+        radius = float(rng.uniform(0.25, 0.40) * nominal_radius)
+    else:
+        radius = float(rng.uniform(0.05, 0.10) * np.mean(env_range))
     midpoint = path_np[len(path_np) // 2]
 
     # Offset perpendicular to path direction at midpoint
@@ -82,49 +163,66 @@ def _generate_easy_scenario(path_np, state_dim, env_min, env_max, env_range, rng
     offset_dist = radius * rng.uniform(2.0, 4.0)
     center = midpoint + offset_dir * offset_dist
 
+    if env_dim >= 3:
+        center = _push_center_away_from_endpoints(center, path_np, radius, env_min, env_max, rng, min_factor=4.5)
     center = np.clip(center, env_min + radius, env_max - radius)
 
     return [{"type": "add_sphere", "center": center.tolist(), "radius": float(radius)}]
 
 
-def _generate_medium_scenario(path_np, state_dim, env_min, env_max, env_range, rng):
+def _generate_medium_scenario(path_np, state_dim, env_min, env_max, env_range, rng, env_dim, nominal_radius):
     """
     Medium: 1 obstacle directly BLOCKING the path (must reroute a section).
     Place obstacle on or very near the path between 30%-70% along it.
     """
-    radius = float(rng.uniform(0.06, 0.12) * np.mean(env_range))
+    if env_dim >= 3:
+        radius = float(rng.uniform(0.40, 0.65) * nominal_radius)
+    else:
+        radius = float(rng.uniform(0.06, 0.12) * np.mean(env_range))
 
     # Pick a point along the middle portion of the path
-    idx = rng.integers(int(len(path_np) * 0.3), int(len(path_np) * 0.7))
+    if env_dim >= 3:
+        idx = rng.integers(int(len(path_np) * 0.45), int(len(path_np) * 0.8))
+    else:
+        idx = rng.integers(int(len(path_np) * 0.3), int(len(path_np) * 0.7))
     center = path_np[idx].copy()
 
     # Small random perturbation (within half a radius)
-    perturb = rng.normal(0, radius * 0.3, size=state_dim)
+    perturb_scale = 0.1 if env_dim >= 3 else 0.3
+    perturb = rng.normal(0, radius * perturb_scale, size=state_dim)
     center += perturb
+    if env_dim >= 3:
+        center = _push_center_away_from_endpoints(center, path_np, radius, env_min, env_max, rng, min_factor=5.0)
     center = np.clip(center, env_min + radius, env_max - radius)
 
     return [{"type": "add_sphere", "center": center.tolist(), "radius": float(radius)}]
 
 
-def _generate_hard_scenario(path_np, state_dim, env_min, env_max, env_range, rng):
+def _generate_hard_scenario(path_np, state_dim, env_min, env_max, env_range, rng, env_dim, nominal_radius):
     """
     Hard: 2-3 obstacles added, substantially changing the free space.
     Place obstacles at different points along the path.
     """
-    n_obstacles = rng.integers(2, 4)  # 2 or 3
+    n_obstacles = int(rng.integers(2, 3)) if env_dim >= 3 else int(rng.integers(2, 4))
     modifications = []
 
     # Spread obstacles along different segments of the path
     segment_size = len(path_np) // (n_obstacles + 1)
     for k in range(n_obstacles):
-        radius = float(rng.uniform(0.06, 0.12) * np.mean(env_range))
+        if env_dim >= 3:
+            radius = float(rng.uniform(0.35, 0.60) * nominal_radius)
+        else:
+            radius = float(rng.uniform(0.06, 0.12) * np.mean(env_range))
         idx = segment_size * (k + 1) + rng.integers(-segment_size // 4, segment_size // 4)
         idx = np.clip(idx, 1, len(path_np) - 2)
         center = path_np[idx].copy()
 
         # Small random perturbation
-        perturb = rng.normal(0, radius * 0.5, size=state_dim)
+        perturb_scale = 0.2 if env_dim >= 3 else 0.5
+        perturb = rng.normal(0, radius * perturb_scale, size=state_dim)
         center += perturb
+        if env_dim >= 3:
+            center = _push_center_away_from_endpoints(center, path_np, radius, env_min, env_max, rng, min_factor=5.0)
         center = np.clip(center, env_min + radius, env_max - radius)
 
         modifications.append({"type": "add_sphere", "center": center.tolist(), "radius": float(radius)})
@@ -180,6 +278,33 @@ def _perpendicular_direction(path_np, idx, state_dim, rng):
         if norm < 1e-8:
             return rng.normal(size=state_dim)
         return random_dir / norm
+
+
+def _push_center_away_from_endpoints(center, path_np, radius, env_min, env_max, rng, min_factor=5.0):
+    """
+    Push obstacle center away from path endpoints to reduce start/goal invalidation.
+    """
+    center = np.asarray(center, dtype=np.float64)
+    endpoints = [path_np[0], path_np[-1]]
+    min_dist = float(min_factor * radius)
+
+    for endpoint in endpoints:
+        delta = center - endpoint
+        dist = np.linalg.norm(delta)
+        if dist < min_dist:
+            if dist < 1e-8:
+                direction = rng.normal(size=center.shape[0])
+                norm = np.linalg.norm(direction)
+                if norm < 1e-8:
+                    direction = np.ones_like(center)
+                    norm = np.linalg.norm(direction)
+                direction = direction / norm
+            else:
+                direction = delta / dist
+            center = endpoint + direction * min_dist
+
+    center = np.clip(center, env_min + radius, env_max - radius)
+    return center
 
 
 # ─────────────────────────────────────────────────────────────────────────────
