@@ -193,24 +193,24 @@ Algorithm~\ref{alg:sdedit} summarizes the MPEdit inference procedure.
 \begin{algorithmic}[1]
 \REQUIRE Reference path $\tau_\text{ref}$, noise level $t_0$, modified
          environment SDF, number of samples~$N$
-\STATE $\mathbf{c}_0 \gets \textsc{PathToControlPoints}(\tau_\text{ref})$
-\STATE $\mathbf{c}_0 \gets \textsc{Normalize}(\mathbf{c}_0)$
+\STATE $\mathbf{c}_0 \gets \text{PathToCtrlPts}(\tau_\text{ref})$
+\STATE $\mathbf{c}_0 \gets \text{Normalize}(\mathbf{c}_0)$
 \FOR{$i = 1$ \TO $N$}
   \STATE $\epsilon \sim \mathcal{N}(0, \mathbf{I})$
   \STATE $\mathbf{c}_{t_0}^{(i)} \gets \sqrt{\bar\alpha_{t_0}}\,\mathbf{c}_0
          + \sqrt{1 - \bar\alpha_{t_0}}\,\epsilon$
 \ENDFOR
 \FOR{$t = t_0, t_0{-}1, \dots, 1$}
-  \STATE $\hat\epsilon \gets \epsilon_\theta(\mathbf{c}_t, t, \mathbf{z})$
-  \STATE $\mathbf{c}_{t-1} \gets \textsc{DDIMStep}(\mathbf{c}_t, \hat\epsilon)
-         - \eta\,\nabla_{\mathbf{c}_t}\mathcal{J}_\text{collision}(\mathbf{c}_t)$
+  \STATE $\hat\epsilon \gets \epsilon_\theta(\mathbf{c}_t^{(1{:}N)}, t, \mathbf{z})$  \hfill $\triangleright$ \textit{batched}
+  \STATE $\mathbf{c}_{t-1}^{(1{:}N)} \gets \text{DDIMStep}(\mathbf{c}_t^{(1{:}N)}, \hat\epsilon)
+         - \eta\,\nabla_{\mathbf{c}_t}\mathcal{J}_\text{coll}}$
   \STATE Clamp start/goal control points
 \ENDFOR
-\STATE $\mathbf{c}_0 \gets \textsc{Unnormalize}(\mathbf{c}_0)$
+\STATE $\mathbf{c}_0^{(1{:}N)} \gets \text{Unnormalize}(\mathbf{c}_0^{(1{:}N)})$
 \STATE $\mathcal{T} \gets \{\tau^{(i)} \mid \tau^{(i)}
-       = \textsc{BSpline}(\mathbf{c}_0^{(i)}),\;
+       = \text{BSpline}(\mathbf{c}_0^{(i)}),\;
        \text{collision-free}\}$
-\RETURN $\arg\min_{\tau\in\mathcal{T}} \textsc{PathLength}(\tau)$
+\RETURN $\arg\min_{\tau\in\mathcal{T}} \text{PathLength}(\tau)$
 \end{algorithmic}
 \end{algorithm}
 
@@ -267,8 +267,8 @@ We compare three methods:
 \begin{itemize}
   \item \textbf{SDEdit (ours):} MPEdit with noise level $t_0{=}7$
         (tuned via Experiment~1).
-  \item \textbf{Full MPD:} standard MPD inference from pure noise ($t_0{=}0$,
-        i.e.\ the full diffusion schedule).
+  \item \textbf{Full MPD:} standard MPD inference from pure noise ($t_0{=}T$,
+        i.e.\ the full diffusion schedule starting from random noise).
   \item \textbf{RRTConnect:} classical bi-directional RRT with a 10\,s
         time limit.
 \end{itemize}
