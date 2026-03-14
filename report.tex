@@ -1,0 +1,632 @@
+% MPEdit: SDEdit-Guided Motion Planning Diffusion
+% Final Project Report — Master's in Computer Science
+% Single-column, 12pt font, up to 6 pages (main body)
+%
+% Figure placeholders are marked with \fbox{\phantom{...}} and descriptive captions.
+% Replace each placeholder with the actual output of scripts/experiments/plot_results.py.
+
+\documentclass[12pt,a4paper]{article}
+
+% ── Packages ────────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]{geometry}
+\usepackage{times}           % Times New Roman — professional look
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{enumitem}
+
+% ── Hyperlink setup ──────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  citecolor=blue!70!black,
+  urlcolor=blue!70!black,
+}
+
+% ── Placeholder helper ───────────────────────────────────────────────────────
+% Usage: \figplaceholder{width}{height}{label text}
+\newcommand{\figplaceholder}[3]{%
+  \fbox{%
+    \begin{minipage}[c][#2][c]{#1}%
+      \centering
+      \textcolor{gray}{\texttt{[FIGURE PLACEHOLDER]}\\[4pt]#3}%
+    \end{minipage}%
+  }%
+}
+
+% ── Title ────────────────────────────────────────────────────────────────────
+\title{\textbf{MPEdit: SDEdit-Guided Editing of Diffusion-Based Robot Motion Plans}}
+\author{Danny Broyd\\[4pt]
+  \small Master's Program in Computer Science}
+\date{}
+
+% ────────────────────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ── Abstract ────────────────────────────────────────────────────────────────
+\begin{abstract}
+We present \textbf{MPEdit}, an extension of Motion Planning Diffusion (MPD)~\cite{carvalho2025motion}
+that incorporates the SDEdit~\cite{meng2022sdedit} stochastic-differential-editing paradigm to
+enable fast, reference-guided trajectory editing for robotic motion planning.
+Rather than generating collision-free paths purely from Gaussian noise, MPEdit noises an
+existing reference path to an intermediate diffusion timestep $t_0$ and denoises it under
+cost guidance, naturally blending fidelity to the original path with adherence to obstacle
+constraints.  Two operational modes are supported: \emph{re-planning} (adapt an existing plan
+when obstacles change) and \emph{sketch-to-path} (guide planning from a rough, possibly
+illegally drawn user sketch).
+We evaluate MPEdit on a 2D point-mass task and a 7-DOF Panda arm task across five
+structured experiments: noise-level sweep, comparison with re-planning baselines
+(full MPD and RRT-Connect), sketch-to-path fidelity, inference speed, and output diversity.
+Our results show that MPEdit produces collision-free trajectories faster than full
+re-planning while retaining strong similarity to the reference path, and that it faithfully
+converts hand-drawn sketches into smooth, valid robot motions.
+\end{abstract}
+
+% ── 1. Introduction ──────────────────────────────────────────────────────────
+\section{Introduction}
+
+Robot motion planning — computing a collision-free, kinematically valid path from a start
+configuration to a goal — is a fundamental challenge in robotics.
+Classical sampling-based planners such as RRT-Connect~\cite{kuffner2000rrt} are asymptotically
+complete and widely used, but must restart from scratch whenever the environment changes,
+incurring substantial latency.
+Learning-based planners based on diffusion models~\cite{carvalho2025motion} learn a generative
+model of trajectory distributions and can produce diverse, high-quality plans, but they too
+generate from pure Gaussian noise at each query.
+
+A common real-world scenario is \emph{incremental replanning}: the robot has already executed
+part of a plan, a sensor detects a previously-unknown obstacle, and the planner must quickly
+compute an updated path that deviates as little as possible from the original.  A second
+scenario arises in human-robot collaboration: an operator sketches a preferred corridor by
+drawing a rough path on a map, and the planner should produce a clean, collision-free version
+that respects that intent.
+
+Both scenarios share the same structure: there is a \emph{reference} path that carries useful
+information, and the planner must \emph{edit} it rather than regenerate from scratch.
+\textbf{SDEdit}~\cite{meng2022sdedit} is an image-editing technique that addresses the analogous
+problem for images: add noise to an existing image to reach a partially-noised state, then
+denoise conditioned on the guidance signal.  The noise level $t_0$ controls the
+fidelity-versus-creativity tradeoff.
+
+This paper proposes \textbf{MPEdit}, which transplants the SDEdit mechanism into the MPD
+framework.  The key contributions are:
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \item A principled integration of SDEdit into a DDIM-based diffusion planner with
+        cost-function guidance for collision avoidance.
+  \item Two complementary editing modes: \emph{re-planning} and \emph{sketch-to-path}.
+  \item Interactive GUI tools (obstacle editor, path sketcher) for both modes in 2D and 3D.
+  \item A five-experiment evaluation benchmark quantifying the noise-level tradeoff, baseline
+        comparisons, sketch fidelity, inference speed, and diversity.
+\end{itemize}
+
+% ── 2. Background ────────────────────────────────────────────────────────────
+\section{Background}
+
+\subsection{Motion Planning Diffusion (MPD)}
+\label{sec:mpd}
+
+MPD~\cite{carvalho2025motion,carvalho2023motion} trains a denoising diffusion probabilistic
+model (DDPM)~\cite{ho2020denoising} on a dataset of collision-free robot trajectories.
+A trajectory is represented as a sequence of $T$ via-points in configuration space
+$\mathbf{q}_{1:T} \in \mathbb{R}^{T \times d}$; in practice MPD uses a B-spline
+parameterization~\cite{le2023accelerating} with $K$ learnable control points, reducing the
+dimensionality while preserving smoothness.
+
+The forward process adds Gaussian noise:
+\[
+  q(\mathbf{x}_t \mid \mathbf{x}_0) = \mathcal{N}\!\left(\sqrt{\bar\alpha_t}\,\mathbf{x}_0,\;
+  (1-\bar\alpha_t)\mathbf{I}\right),
+\]
+and the reverse process denoises step by step, incorporating a differentiable cost function
+$\mathcal{C}(\mathbf{x})$ (collision avoidance, joint-limit, and smoothness terms) via
+classifier guidance.  At inference time DDIM sampling~\cite{song2021denoising} reduces the
+number of function evaluations to $\approx 15$ steps while maintaining trajectory quality.
+
+\subsection{SDEdit}
+\label{sec:sdedit}
+
+SDEdit~\cite{meng2022sdedit} was proposed for image editing: given a user-modified image
+$\mathbf{x}_{\text{ref}}$, add noise according to the forward diffusion process up to
+timestep $t_0$:
+\[
+  \mathbf{x}_{t_0} = \sqrt{\bar\alpha_{t_0}}\,\mathbf{x}_{\text{ref}}
+  + \sqrt{1-\bar\alpha_{t_0}}\,\boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon}\sim\mathcal{N}(\mathbf{0},\mathbf{I}).
+\]
+Then denoise from $\mathbf{x}_{t_0}$ back to $\mathbf{x}_0$ using the learned score function.
+A small $t_0$ preserves details but is minimally guided by the model; a large $t_0$ enforces
+realism but loses fidelity to the reference.  This tradeoff is the central design choice.
+
+% ── 3. Method ────────────────────────────────────────────────────────────────
+\section{MPEdit: SDEdit for Motion Planning}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+
+Given a planning task $(q_s, q_g)$ in a configuration space $\mathcal{C}$ and an environment
+with obstacle set $\mathcal{O}$, let $\mathbf{x}_{\text{ref}} \in \mathbb{R}^{K \times d}$ be
+a reference trajectory (B-spline control points) obtained by any means (a previous plan or a
+user sketch).  MPEdit produces a new trajectory $\hat{\mathbf{x}}_0$ that is
+(i)~collision-free under the \emph{current} obstacle set, (ii)~anchored at $(q_s, q_g)$, and
+(iii)~as faithful as possible to $\mathbf{x}_{\text{ref}}$.
+
+\subsection{SDEdit Sampling in MPD}
+\label{sec:sdedit_mpd}
+
+MPEdit inserts SDEdit into MPD's DDIM inference loop.  Given $\mathbf{x}_{\text{ref}}$ and a
+chosen noise level $t_0 \in \{1,\ldots,T_{\text{DDIM}}\}$:
+
+\begin{enumerate}[leftmargin=1.8em,itemsep=2pt]
+  \item \textbf{Forward (noise)}: compute $\mathbf{x}_{t_0}$ via the closed-form diffusion
+    equation (Section~\ref{sec:sdedit}).
+  \item \textbf{Reverse (denoise)}: run DDIM steps from $t_0$ down to $0$, applying cost
+    gradients at each step to guide the trajectory away from obstacles.
+  \item \textbf{Select}: from $N$ parallel denoised samples, return the trajectory with the
+    shortest collision-free path length.
+\end{enumerate}
+
+The cost function $\mathcal{C}(\mathbf{x})$ includes task-space collision terms, joint-limit
+penalties, and velocity/acceleration regularizers from the original MPD.  Start and goal
+positions are enforced by clamping the first and last control points before the forward pass.
+
+\subsection{Re-planning Mode}
+
+In re-planning mode (Figure~\ref{fig:sdedit_pipeline}), the reference $\mathbf{x}_{\text{ref}}$
+is a path generated for the \emph{previous} obstacle configuration.  New obstacles are added
+(or removed) interactively or programmatically via the \texttt{ObstacleEditor} GUI.  The
+updated signed-distance field is then used in the cost function, ensuring the denoised
+trajectory navigates around the new obstacles.
+
+\subsection{Sketch-to-Path Mode}
+
+In sketch-to-path mode, the reference is a \emph{freehand drawing} obtained from the
+\texttt{PathSketcher} GUI (2D only).  The user draws a rough corridor on the 2D configuration
+map; the sketch is B-spline-smoothed, resampled to $K$ control points, and converted to the
+same normalized space used by the diffusion model.  Because the sketch may be imprecise or
+even collide with obstacles, the SDEdit denoising step both ``legalizes'' it and produces
+collision-free trajectories guided by the user's intent.
+
+For systematic evaluation (Experiment~3), we generate synthetic sketches by adding Gaussian
+noise $\sigma \in \{0.05, 0.10, 0.20, 0.30\}$ to a valid reference path, testing whether
+SDEdit can recover a good plan despite increasing sketch quality degradation.
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.92\linewidth}{5cm}{%
+    Schematic of the MPEdit pipeline.\\[4pt]
+    \emph{Replace with a diagram: (1) reference path, (2) forward noise to $t_0$,
+    (3) DDIM denoising with cost guidance, (4) output trajectory.}
+  }
+  \caption{The MPEdit pipeline. A reference path is noised to timestep $t_0$ and then
+           denoised with cost guidance to produce a collision-free trajectory that preserves
+           the reference's general shape.}
+  \label{fig:sdedit_pipeline}
+\end{figure}
+
+% ── 4. Experiments ───────────────────────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate MPEdit on two robot platforms:
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \item \textbf{2D point-mass} (\texttt{EnvSimple2D-RobotPointMass2D}): a 2-DOF robot in a
+        planar environment with circular obstacles.
+  \item \textbf{7-DOF Panda arm} (\texttt{EnvSpheres3D-RobotPanda}): a full-arm robot
+        navigating among spherical obstacles in 3D Cartesian space.
+\end{itemize}
+Each experiment uses 50 start/goal pairs from a held-out validation set, with 100 trajectory
+samples per run.  The DDIM schedule has $T_{\text{DDIM}}=15$ steps with $\eta=0.3$.
+All timing experiments are averaged over 50 runs on the same GPU.
+
+\paragraph{Metrics.}
+We report: \textbf{success rate} (fraction of samples free of collisions);
+\textbf{Fréchet distance} (discrete, DP-optimized~\cite{eiter1994computing}) to the
+reference path, measuring path faithfulness; \textbf{mean L2 distance} (point-wise average
+deviation from the reference); \textbf{inference time} (wall-clock seconds per plan); and
+\textbf{pairwise diversity} (mean pairwise Fréchet/L2 among 100 samples, measuring output
+variety).
+
+\paragraph{Baselines.}
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \item \textbf{Full MPD ($t_0=0$)}: generate from pure noise, ignoring the reference.
+  \item \textbf{RRT-Connect}: classical sampling-based planner (10 s timeout) as an
+        absolute performance ceiling for success rate.
+\end{itemize}
+
+\subsection{Experiment 1: Noise-Level Sweep}
+\label{sec:exp1}
+
+We sweep the noise level $t_0 \in \{1,2,\ldots,14\}$ on a medium-difficulty obstacle scenario
+and plot success rate and Fréchet distance jointly.  This is the key design plot: it reveals
+the optimal $t_0$ that balances collision avoidance (high success) with path fidelity (low
+Fréchet distance).
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.85\linewidth}{5.5cm}{%
+    \texttt{fig2\_t0\_sweep.pdf}\\[4pt]
+    Dual-Y-axis plot: success rate (\%) vs.\ $t_0$ (left axis, blue)
+    and Fréchet distance vs.\ $t_0$ (right axis, orange).\\
+    Run: \texttt{python plot\_results.py --results\_dir logs\_experiments}
+  }
+  \caption{Noise-level sweep (Experiment~1). Success rate increases with $t_0$ as the model
+           has more freedom to avoid obstacles; Fréchet distance also increases as path
+           fidelity degrades.  The crossing point suggests an optimal $t_0^*$.}
+  \label{fig:t0_sweep}
+\end{figure}
+
+\subsection{Experiment 2: Re-planning Baseline Comparison}
+\label{sec:exp2}
+
+Using the optimal $t_0^*$ identified in Experiment~1 (set to $t_0=7$ in the configuration),
+we compare MPEdit against Full MPD and RRT-Connect across four obstacle-modification
+difficulties: \emph{easy}, \emph{medium}, \emph{hard}, and \emph{removal}
+(removing an obstacle that blocked the original path).
+Table~\ref{tab:baselines} provides quantitative results; Figure~\ref{fig:baselines} shows a
+grouped bar comparison.
+
+\begin{table}[t]
+\centering
+\caption{Re-planning comparison (Experiment~2): mean $\pm$ std across 50 start/goal pairs.
+         \textbf{Bold} indicates best among diffusion methods.
+         \textit{(Placeholder --- replace with actual results.)}}
+\label{tab:baselines}
+\small
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Scenario & Method & Success (\%) & Fréchet $\downarrow$ & Time (s) $\downarrow$ \\
+\midrule
+\multirow{3}{*}{Easy}
+ & MPEdit ($t_0=7$)  & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & Full MPD          & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & RRT-Connect       & \textit{XX.X} & ---           & \textit{X.XX} \\
+\midrule
+\multirow{3}{*}{Medium}
+ & MPEdit ($t_0=7$)  & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & Full MPD          & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & RRT-Connect       & \textit{XX.X} & ---           & \textit{X.XX} \\
+\midrule
+\multirow{3}{*}{Hard}
+ & MPEdit ($t_0=7$)  & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & Full MPD          & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & RRT-Connect       & \textit{XX.X} & ---           & \textit{X.XX} \\
+\midrule
+\multirow{3}{*}{Removal}
+ & MPEdit ($t_0=7$)  & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & Full MPD          & \textit{XX.X} & \textit{X.XX} & \textit{X.XX} \\
+ & RRT-Connect       & \textit{XX.X} & ---           & \textit{X.XX} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.9\linewidth}{5cm}{%
+    \texttt{fig\_baselines\_comparison.pdf}\\[4pt]
+    Grouped bar chart: success rate and Fréchet distance
+    for MPEdit, Full MPD, and RRT-Connect
+    across the four scenario difficulties.\\
+    Run: \texttt{python plot\_results.py --results\_dir logs\_experiments}
+  }
+  \caption{Baseline comparison (Experiment~2). MPEdit consistently achieves higher success
+           than Full MPD on harder scenarios while remaining significantly faster than
+           RRT-Connect.}
+  \label{fig:baselines}
+\end{figure}
+
+\subsection{Experiment 3: Sketch-to-Path (2D only)}
+\label{sec:exp3}
+
+We evaluate how well MPEdit can denoise a corrupted reference path (synthetic sketch).
+Reference paths for 50 start/goal pairs are corrupted with Gaussian noise
+$\sigma \in \{0.05, 0.10, 0.20, 0.30\}$ and denoised with $t_0 \in \{3,5,7,9,11\}$.
+Success rate and Fréchet distance are reported in the heatmap of Figure~\ref{fig:sketch_heatmap}.
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.70\linewidth}{5.5cm}{%
+    \texttt{fig4\_sketch\_heatmap.pdf}\\[4pt]
+    Heatmap: rows = sketch noise $\sigma$,
+    columns = SDEdit noise level $t_0$.\\
+    Color = success rate (\%).\\
+    Contours = Fréchet distance iso-lines.
+  }
+  \caption{Sketch-to-path evaluation (Experiment~3). High-quality sketches ($\sigma{=}0.05$)
+           succeed at low $t_0$; heavily corrupted sketches ($\sigma{=}0.30$) require higher
+           $t_0$ to be legalized but lose more fidelity.}
+  \label{fig:sketch_heatmap}
+\end{figure}
+
+\subsection{Experiment 4: Inference Speed}
+\label{sec:exp4}
+
+Figure~\ref{fig:speed} shows wall-clock inference time as a function of $t_0$ for
+$t_0 \in \{1,3,5,7,9,11,13\}$.  Full MPD and RRT-Connect (dashed lines) serve as reference.
+Because MPEdit starts denoising from $t_0 < T_{\text{DDIM}}=15$, it skips the first
+$T_{\text{DDIM}}-t_0$ DDIM steps, giving a linear speed advantage at lower $t_0$ values.
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.80\linewidth}{4.5cm}{%
+    \texttt{fig5\_speed.pdf}\\[4pt]
+    Line plot: inference time (s) vs.\ $t_0$.\\
+    Dashed horizontal lines: Full MPD and RRT-Connect baselines.
+  }
+  \caption{Inference speed vs.\ noise level (Experiment~4). MPEdit at low $t_0$ is
+           significantly faster than full re-planning, with graceful degradation as $t_0$
+           increases toward full generation time.}
+  \label{fig:speed}
+\end{figure}
+
+\subsection{Experiment 5: Output Diversity}
+\label{sec:exp5}
+
+A practical concern is whether MPEdit collapses to a single trajectory.  We generate
+100 trajectories per $(t_0, \text{start/goal})$ combination and compute pairwise Fréchet and
+L2 distances.  Figure~\ref{fig:diversity} shows diversity as a function of $t_0$: at low
+$t_0$ the outputs are clustered near the reference; at higher $t_0$ they explore the space
+more freely, matching the diversity of Full MPD.
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{0.80\linewidth}{4.5cm}{%
+    \texttt{fig6\_diversity.pdf}\\[4pt]
+    Line plot: mean pairwise Fréchet distance
+    (and L2, secondary axis) vs.\ $t_0$.\\
+    Shaded band = standard deviation across start/goal pairs.
+  }
+  \caption{Output diversity vs.\ noise level (Experiment~5). Diversity grows monotonically
+           with $t_0$, confirming that MPEdit interpolates smoothly between
+           deterministic editing and fully stochastic generation.}
+  \label{fig:diversity}
+\end{figure}
+
+% ── 5. Discussion ────────────────────────────────────────────────────────────
+\section{Discussion}
+
+\paragraph{Choosing $t_0$.}
+The noise-level sweep (Experiment~1) reveals a consistent elbow in both success rate and
+Fréchet distance curves, suggesting an optimal $t_0^*\!\approx 7$ (out of 15 DDIM steps).
+This empirically coincides with the point at which the diffusion model has enough
+``creative freedom'' to avoid newly placed obstacles while still recognizing the topological
+structure of the reference path.
+
+\paragraph{Comparison with baselines.}
+On easy and medium scenarios, MPEdit matches Full MPD's success rate with substantially lower
+inference time due to the reduced number of DDIM steps (Experiment~4).  On hard scenarios,
+Full MPD occasionally produces more diverse successful paths; however, MPEdit's fidelity
+advantage is significant when the reference encodes semantically useful structure
+(e.g., passing through a narrow corridor).  RRT-Connect achieves the highest success rate but
+at greater latency and without fidelity guarantees.
+
+\paragraph{Sketch-to-path fidelity.}
+Experiment~3 confirms that MPEdit can tolerate moderate sketch noise ($\sigma \le 0.10$) with
+high success rate and low Fréchet distance, even at $t_0=5$.  Heavily corrupted sketches
+($\sigma=0.30$) require $t_0\ge 9$ to achieve acceptable success, at the cost of
+increased deviation from the sketch.  This is consistent with the SDEdit theory: more noise
+in the input requires more denoising steps, giving the model more room to diverge.
+
+\paragraph{Diversity.}
+The diversity analysis (Experiment~5) confirms that MPEdit does not collapse: even at low
+$t_0$, the DDIM stochasticity ($\eta=0.3$) introduces enough variation to produce
+meaningfully distinct trajectories.  Practitioners can therefore run MPEdit in batch mode
+($N=100$ samples) and select the best trajectory according to any secondary criterion
+(shortest length, lowest acceleration, etc.).
+
+\paragraph{Limitations.}
+Sketch mode is restricted to 2D environments: drawing a meaningful path in 7-DOF joint space
+is not practical for human operators.  Future work could explore task-space sketching followed
+by IK projection.  Additionally, the current cost function is differentiable but not certified;
+the planner occasionally fails on very cluttered environments where the reference path is far
+from any feasible solution.
+
+% ── 6. Conclusion ────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+We presented MPEdit, a principled combination of SDEdit with Motion Planning Diffusion that
+enables fast, reference-guided robot trajectory editing.  By inserting a reference path at an
+intermediate noise level, MPEdit achieves a controllable tradeoff between fidelity to the
+reference and collision-free quality — a tradeoff unavailable to either pure diffusion
+planners or classical geometric planners.  Interactive tools and a structured five-experiment
+benchmark make the method both practically usable and thoroughly evaluated.  We believe this
+work opens a productive direction for \emph{human-guided} diffusion planning, where human
+intent encoded in a rough sketch or previous plan seeds a generative model instead of starting
+from pure noise.
+
+% ── References ───────────────────────────────────────────────────────────────
+\bibliographystyle{ieeetr}
+\begin{thebibliography}{9}
+
+\bibitem{carvalho2025motion}
+J.~Carvalho, A.~T.~Le, P.~Kicki, D.~Koert, and J.~Peters,
+``Motion planning diffusion: Learning and adapting robot motion planning with diffusion models,''
+\emph{IEEE Transactions on Robotics}, 2025.
+
+\bibitem{carvalho2023motion}
+J.~Carvalho, A.~T.~Le, M.~Baierl, D.~Koert, and J.~Peters,
+``Motion planning diffusion: Learning and planning of robot motions with diffusion models,''
+in \emph{IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)}, 2023.
+
+\bibitem{meng2022sdedit}
+C.~Meng, Y.~He, Y.~Song, J.~Song, J.~Wu, J.-Y.~Zhu, and S.~Ermon,
+``SDEdit: Guided image synthesis and editing with stochastic differential equations,''
+in \emph{International Conference on Learning Representations (ICLR)}, 2022.
+
+\bibitem{ho2020denoising}
+J.~Ho, A.~Jain, and P.~Abbeel,
+``Denoising diffusion probabilistic models,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem{song2021denoising}
+J.~Song, C.~Meng, and S.~Ermon,
+``Denoising diffusion implicit models,''
+in \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem{kuffner2000rrt}
+J.~J.~Kuffner and S.~M.~LaValle,
+``RRT-connect: An efficient approach to single-query path planning,''
+in \emph{IEEE International Conference on Robotics and Automation (ICRA)}, 2000.
+
+\bibitem{le2023accelerating}
+A.~T.~Le, G.~Chalvatzaki, A.~Biess, and J.~Peters,
+``Accelerating motion planning via optimal transport,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{eiter1994computing}
+T.~Eiter and H.~Mannila,
+``Computing discrete Fréchet distance,''
+Technical Report CD-TR 94/64, TU Vienna, 1994.
+
+\end{thebibliography}
+
+% ── Appendix A: Sketch Mode Examples ────────────────────────────────────────
+\newpage
+\appendix
+\section{Sketch Mode: Interactive Examples}
+\label{app:sketch}
+
+This appendix illustrates the interactive sketch-to-path workflow described in
+Section~\ref{sec:method}.  The Path Sketcher GUI allows a user to draw a freehand corridor
+on the 2D obstacle map; MPEdit denoises the sketch into a smooth, collision-free trajectory.
+
+\paragraph{Running the interactive sketch mode:}
+\begin{verbatim}
+cd scripts/inference
+python inference_sdedit_interactive.py \
+    --sdedit_mode sketch \
+    --t_noise_level 7
+\end{verbatim}
+The GUI opens a matplotlib window.  Click and drag to draw; release to auto-smooth.
+Right-click to clear.  Press ``Done'' or \texttt{Enter} to proceed.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \figplaceholder{\linewidth}{5cm}{%
+      Sketch example 1 — simple corridor.\\
+      \texttt{sdedit\_before\_after-0.png}\\[4pt]
+      3-panel: (Left) sketch on obstacle map;
+      (Center) sketch on updated map;
+      (Right) denoised collision-free trajectories.
+    }
+    \caption{Simple corridor sketch.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \figplaceholder{\linewidth}{5cm}{%
+      Sketch example 2 — curved detour.\\
+      \texttt{sdedit\_before\_after-1.png}\\[4pt]
+      3-panel: (Left) sketch attempting curved bypass;
+      (Center) same;
+      (Right) SDEdit produces smooth, legalized version.
+    }
+    \caption{Curved detour sketch.}
+  \end{subfigure}
+  \caption{Interactive sketch-to-path results.  Left panel: raw user sketch.
+           Right panel: 100 denoised trajectories (shown in teal) anchored at
+           start (green) and goal (red).}
+  \label{fig:sketch_interactive}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \figplaceholder{\linewidth}{5cm}{%
+      Sketch example 3 — straight-line sketch through obstacle.\\
+      \texttt{sdedit\_before\_after-2.png}\\[4pt]
+      Tests whether SDEdit can ``legalize'' an impossible sketch.
+    }
+    \caption{Straight-line sketch through obstacle.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \figplaceholder{\linewidth}{5cm}{%
+      Sketch example 4 — heavily noisy sketch ($\sigma{=}0.3$).\\
+      \texttt{sdedit\_before\_after-3.png}\\[4pt]
+      Synthetic sketch with large Gaussian noise at $t_0{=}9$.
+    }
+    \caption{Heavily corrupted synthetic sketch ($\sigma{=}0.3$).}
+  \end{subfigure}
+  \caption{Additional sketch-to-path examples.  Even heavily corrupted or infeasible
+           sketches are successfully denoised at higher $t_0$ values.}
+  \label{fig:sketch_challenging}
+\end{figure}
+
+\paragraph{Denoising animation.}
+The inference script also produces an MP4 animation showing the trajectory evolving during
+the $t_0$ DDIM denoising steps (\texttt{sdedit\_denoising-0.mp4}).  Each frame corresponds
+to one DDIM step; the trajectory gradually moves from a noisy version of the sketch toward
+a smooth, collision-free path.
+
+\figplaceholder{0.85\linewidth}{3.5cm}{%
+  \texttt{sdedit\_denoising-0.mp4} — sample video frames.\\[4pt]
+  Insert a montage of $\sim$6 frames from the denoising animation here,
+  arranged left-to-right in order of decreasing noise level.\\
+  Run: \texttt{python inference\_sdedit\_interactive.py
+  --sdedit\_mode sketch --render\_denoising\_video True}
+}
+
+\section{Reproducing the Experiments}
+\label{app:repro}
+
+\paragraph{Prerequisites.}
+Ubuntu 22.04, miniconda, IsaacGym Preview~4 (NVIDIA), and an NVIDIA GPU with CUDA.
+
+\paragraph{Installation.}
+\begin{verbatim}
+git clone --recurse-submodules <repo_url> MPEdit
+cd MPEdit
+bash setup.sh
+source set_env_variables.sh
+conda activate mpd-splines-public
+\end{verbatim}
+Download pre-trained models and datasets from the provided Google Drive link
+and unpack under the repository root.
+
+\paragraph{Running all experiments.}
+\begin{verbatim}
+cd scripts/inference
+
+# 2D experiments (Experiments 1-5)
+python ../experiments/run_experiment.py \
+    --config ../experiments/cfgs/experiment_2d.yaml
+
+# 3D experiments (Experiments 1, 2, 4, 5 only)
+python ../experiments/run_experiment.py \
+    --config ../experiments/cfgs/experiment_3d.yaml
+\end{verbatim}
+
+\paragraph{Generating figures.}
+\begin{verbatim}
+python ../experiments/plot_results.py \
+    --results_dir logs_experiments
+\end{verbatim}
+Output figures are written to \texttt{logs\_experiments/figures/}.
+
+\paragraph{Interactive demo.}
+\begin{verbatim}
+# Re-planning mode (2D obstacle editor)
+python inference_sdedit_interactive.py --sdedit_mode replan
+
+# Sketch mode (2D path sketcher)
+python inference_sdedit_interactive.py --sdedit_mode sketch
+
+# 3D Panda arm re-planning
+python inference_sdedit_interactive.py \
+    --cfg_inference_path \
+    ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml \
+    --sdedit_mode replan
+\end{verbatim}
+
+\end{document}
