@@ -1,3 +1,37 @@
+# MPEdit: Motion Planning with SDEdit-Style Path Regeneration
+
+This repository extends Motion Planning Diffusion (MPD) with SDEdit-style stochastic editing for adaptive robot path planning. This work is a final project for a Master's Computer Science course.
+
+## Final Project Report
+
+The complete project report (LaTeX format) is available in the root directory:
+
+- **Main report**: `report.tex` - 6-page LaTeX document with comprehensive experimental evaluation
+- **Bibliography**: `references.bib` - All citations
+- **Compilation instructions**: `REPORT_README.md` - Detailed instructions for compiling the report
+
+### Quick Compilation
+
+```bash
+# Using the provided script
+bash compile_report.sh
+
+# Or using Make
+make          # Full compilation with bibliography
+make quick    # Quick single-pass compilation
+make view     # Open the PDF
+make help     # See all options
+```
+
+The report includes:
+- Abstract, introduction, and background on MPD and SDEdit
+- Detailed methodology for SDEdit-style motion planning
+- Five comprehensive experiments with results and analysis
+- Appendix with sketch mode examples and demonstrations
+- Placeholders for all experimental figures (or actual figures if experiments have been run)
+
+---
+
 # Installation
 
 Pre-requisites:

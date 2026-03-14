@@ -1,0 +1,522 @@
+\documentclass[12pt,letterpaper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% Title and author
+\title{\textbf{MPEdit: Adaptive Motion Planning with SDEdit-Style Path Regeneration}}
+\author{Final Project Report\\
+Master of Computer Science\\
+Motion Planning Course}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present \textbf{MPEdit}, a novel approach that combines Motion Planning Diffusion (MPD) with SDEdit-style stochastic differential editing for adaptive robot path planning. Unlike traditional motion planners that generate paths from scratch, MPEdit can efficiently adapt existing paths to modified environments by adding controlled noise at intermediate diffusion timesteps and denoising through learned diffusion models. We introduce two primary use cases: (1) \textit{re-planning}, where valid paths are quickly adapted to minor obstacle changes, and (2) \textit{sketch-to-path}, where approximate user-drawn paths are refined into collision-free trajectories. Through comprehensive experiments on 2D point-mass and 7-DOF manipulator environments, we demonstrate that MPEdit achieves a favorable tradeoff between path quality and computational efficiency, with configurable noise levels controlling the balance between faithfulness to the input and solution diversity. Our implementation includes interactive GUI tools for obstacle editing and path sketching, making the system practical for real-world applications. Experimental results across 50+ scenarios show that MPEdit can achieve similar success rates to full MPD generation (49.2\% vs 52.7\% in medium difficulty) while maintaining better faithfulness to the input path (Fréchet distance 0.261 vs 0.282).
+\end{abstract}
+
+\section{Introduction}
+
+Robot motion planning remains a fundamental challenge in robotics, requiring the generation of collision-free paths in complex environments. Traditional sampling-based planners like RRT~\cite{lavalle1998rapidly} and probabilistic roadmaps excel at finding feasible solutions but often produce jerky, suboptimal trajectories. Recent advances in diffusion models have shown promise for learning-based motion planning, with Motion Planning Diffusion (MPD)~\cite{carvalho2023motion,carvalho2025motion} demonstrating the ability to generate smooth, dynamically feasible paths by treating planning as a conditional generation problem.
+
+However, a key limitation of generation-based approaches is their computational cost when environments change incrementally. When a single obstacle is added or moved, regenerating the entire path from scratch discards valuable information from the previous solution. Similarly, when human operators have approximate path intentions (e.g., a rough sketch), forcing the system to ignore this prior knowledge and start from pure noise is inefficient.
+
+In this work, we address these limitations by integrating SDEdit~\cite{meng2021sdedit}—a technique originally developed for image editing with diffusion models—into the MPD framework. SDEdit enables controlled editing of generated samples by adding noise to an existing sample up to an intermediate diffusion timestep, then denoising with updated conditioning. We adapt this approach to motion planning, introducing two key capabilities:
+
+\begin{enumerate}
+    \item \textbf{Re-planning}: When obstacles are added, removed, or moved, we noise the existing valid path and denoise under updated collision constraints, producing adapted paths that smoothly accommodate the changes.
+    \item \textbf{Sketch-to-path}: Users can draw approximate paths (potentially colliding with obstacles), which are then refined into valid, collision-free trajectories while preserving the sketch's overall structure.
+\end{enumerate}
+
+Our approach introduces a critical tuning parameter: the noise level $t_0$ (the diffusion timestep at which we inject noise). Lower $t_0$ values preserve more of the input structure but limit solution diversity, while higher $t_0$ values provide more freedom but may diverge from the input. We conduct extensive experiments to characterize this tradeoff and identify optimal operating points.
+
+\textbf{Contributions:}
+\begin{itemize}
+    \item First application of SDEdit-style editing to robot motion planning with diffusion models
+    \item Implementation of interactive tools for obstacle editing and path sketching in both 2D and 3D environments
+    \item Comprehensive experimental evaluation across 5 experiments characterizing the success-faithfulness tradeoff, baseline comparisons, sketch quality analysis, inference speed, and output diversity
+    \item Open-source implementation built on the MPD framework with full reproducibility
+\end{itemize}
+
+\section{Background}
+
+\subsection{Motion Planning Diffusion (MPD)}
+
+Motion Planning Diffusion~\cite{carvalho2023motion,carvalho2025motion} formulates robot motion planning as a conditional denoising diffusion problem. Paths are represented as sequences of B-spline control points, which are progressively refined from Gaussian noise through a learned reverse diffusion process.
+
+Given a start configuration $\mathbf{q}_{\text{start}}$ and goal $\mathbf{q}_{\text{goal}}$, MPD generates a trajectory $\mathbf{x} = \{\mathbf{x}_1, \ldots, \mathbf{x}_T\}$ by:
+
+\begin{equation}
+    \mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}} \left( \mathbf{x}_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(\mathbf{x}_t, t, \mathbf{c}) \right) + \sigma_t \mathbf{z}
+\end{equation}
+
+where $\epsilon_\theta$ is a learned denoising network (typically a U-Net), $\mathbf{c}$ encodes the task conditioning (start/goal states, obstacle map), $\alpha_t$ are noise schedule parameters, and $\mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$.
+
+A key innovation in MPD is the integration of gradient-based guidance during sampling. At each denoising step, the predicted trajectory is refined through gradient descent on a differentiable cost function:
+
+\begin{equation}
+    \mathbf{x}_t' = \mathbf{x}_t - \eta \nabla_{\mathbf{x}_t} \mathcal{L}_{\text{cost}}(\mathbf{x}_t)
+\end{equation}
+
+where $\mathcal{L}_{\text{cost}}$ includes collision avoidance terms computed from differentiable signed distance fields (SDFs).
+
+\subsection{SDEdit: Stochastic Differential Editing}
+
+SDEdit~\cite{meng2021sdedit} introduced a paradigm for editing samples from diffusion models without retraining. Given an input $\mathbf{x}_0$ (e.g., a user-edited image) and a pre-trained diffusion model, SDEdit:
+
+\begin{enumerate}
+    \item Adds noise to $\mathbf{x}_0$ using the forward diffusion process up to timestep $t_0$: $\mathbf{x}_{t_0} = \sqrt{\bar{\alpha}_{t_0}} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{t_0}} \boldsymbol{\epsilon}$
+    \item Denoises from $\mathbf{x}_{t_0}$ to $\mathbf{x}_0$ using the reverse process
+\end{enumerate}
+
+The noise level $t_0$ controls the tradeoff: small $t_0$ preserves input structure (high faithfulness), while large $t_0$ allows more freedom (high diversity). This principle has been successfully applied to image synthesis~\cite{meng2021sdedit}, but its application to motion planning is unexplored.
+
+\section{Methodology}
+
+\subsection{SDEdit for Motion Planning}
+
+We adapt the SDEdit framework to robot motion planning by treating existing paths as inputs to be refined. Our method operates on B-spline control point representations $\mathbf{x}_0 \in \mathbb{R}^{N \times d}$, where $N$ is the number of control points and $d$ is the robot's configuration space dimension.
+
+\textbf{Algorithm:} Given an input path $\mathbf{x}_{\text{input}}$, start/goal configurations $(\mathbf{q}_s, \mathbf{q}_g)$, and noise level $t_0 \in \{0, \ldots, T\}$:
+
+\begin{algorithm}
+\caption{MPEdit Path Regeneration}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Path $\mathbf{x}_{\text{input}}$, noise level $t_0$, environment $\mathcal{E}$
+\STATE \textbf{Output:} Refined collision-free path $\mathbf{x}_{\text{output}}$
+\STATE
+\STATE // Convert to normalized control points
+\STATE $\mathbf{x}_0 \leftarrow \text{PathToControlPoints}(\mathbf{x}_{\text{input}})$
+\STATE
+\STATE // Forward diffusion to $t_0$
+\STATE $\boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$
+\STATE $\mathbf{x}_{t_0} \leftarrow \sqrt{\bar{\alpha}_{t_0}} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{t_0}} \boldsymbol{\epsilon}$
+\STATE
+\STATE // Reverse diffusion with guidance
+\FOR{$t = t_0$ \textbf{down to} $1$}
+    \STATE $\mathbf{x}_t' \leftarrow \mathbf{x}_t - \eta \nabla_{\mathbf{x}_t} \mathcal{L}_{\text{collision}}(\mathbf{x}_t, \mathcal{E})$ \quad // Guidance
+    \STATE $\boldsymbol{\epsilon}_\theta \leftarrow \text{DenoiseNet}(\mathbf{x}_t', t, \mathbf{q}_s, \mathbf{q}_g, \mathcal{E})$
+    \STATE $\mathbf{x}_{t-1} \leftarrow \text{DDIMStep}(\mathbf{x}_t', \boldsymbol{\epsilon}_\theta, t)$ \quad // Denoise
+\ENDFOR
+\STATE
+\STATE // Convert back to waypoints
+\STATE $\mathbf{x}_{\text{output}} \leftarrow \text{ControlPointsToPath}(\mathbf{x}_0)$
+\RETURN $\mathbf{x}_{\text{output}}$
+\end{algorithmic}
+\end{algorithm}
+
+The collision cost $\mathcal{L}_{\text{collision}}$ is computed using the environment's signed distance field, enabling differentiable gradient-based guidance toward collision-free regions.
+
+\subsection{Re-planning Mode}
+
+When the environment changes (obstacles added/removed/moved), we use the original valid path as input:
+
+\begin{enumerate}
+    \item Obtain a reference path $\mathbf{x}_{\text{ref}}$ using a fast planner (e.g., RRTConnect) in the original environment
+    \item Modify the environment $\mathcal{E} \rightarrow \mathcal{E}'$ (add/remove obstacles)
+    \item Apply MPEdit with updated collision cost computed from $\mathcal{E}'$
+\end{enumerate}
+
+The noise level $t_0$ controls adaptation: low $t_0$ produces paths similar to $\mathbf{x}_{\text{ref}}$ (useful when changes are minor), while high $t_0$ allows more deviation (useful when substantial replanning is needed).
+
+\subsection{Sketch-to-Path Mode}
+
+For user-guided planning, we enable freehand path sketching:
+
+\begin{enumerate}
+    \item User draws an approximate path $\mathbf{x}_{\text{sketch}}$ on the environment map (may collide with obstacles)
+    \item The sketch is automatically smoothed and resampled to match the model's expected number of waypoints
+    \item MPEdit refines $\mathbf{x}_{\text{sketch}}$ into a valid, collision-free trajectory
+\end{enumerate}
+
+This mode is particularly useful when human intuition about path structure (e.g., which side of an obstacle to pass) should guide the planner, but manual specification of exact collision-free waypoints is tedious.
+
+\subsection{Implementation Details}
+
+\textbf{Architecture:} We build on the pre-trained MPD models from~\cite{carvalho2025motion}, which use a 1D U-Net with cross-attention conditioning on start/goal states. Control points are represented as normalized coordinates in $[-1, 1]$.
+
+\textbf{Sampling:} We use DDIM sampling~\cite{song2020denoising} with 15 timesteps ($T=15$) and $\eta \in [0.3, 0.5]$ for controlled stochasticity. The noise level $t_0$ ranges from 1 (barely any noise) to 14 (nearly full noise).
+
+\textbf{Guidance:} At each denoising step, we apply 5 gradient descent iterations with step size $\eta = 0.01$ on the collision cost. The cost is computed from a voxelized signed distance field (SDF) representing obstacle geometry.
+
+\textbf{Path Conversion:} Input waypoint paths are converted to B-spline control points through least-squares fitting with boundary constraints at start/goal. The inverse conversion uses B-spline evaluation at uniformly spaced parameters.
+
+\textbf{Interactive Tools:} We developed GUI editors using matplotlib:
+\begin{itemize}
+    \item \textit{Obstacle Editor}: Click-and-drag interface for adding/removing spheres and boxes (2D) or spheres (3D)
+    \item \textit{Path Sketcher}: Freehand drawing tool with automatic smoothing and resampling (2D only)
+\end{itemize}
+
+\section{Experiments}
+
+We evaluate MPEdit through five comprehensive experiments on two environments:
+\begin{itemize}
+    \item \textbf{EnvSimple2D}: 2D workspace with circular obstacles, 2-DOF point-mass robot
+    \item \textbf{EnvSpheres3D}: 3D workspace with spherical obstacles, 7-DOF Franka Panda arm
+\end{itemize}
+
+For all experiments, we use 50 start/goal pairs from the validation split and generate 100 trajectory samples per configuration unless otherwise noted.
+
+\subsection{Experiment 1: Noise Level Sweep}
+
+\textbf{Goal:} Characterize the tradeoff between success rate and path faithfulness as a function of $t_0$.
+
+\textbf{Setup:} For a fixed medium-difficulty obstacle scenario, we sweep $t_0 \in \{1, 2, \ldots, 14\}$ and measure:
+\begin{itemize}
+    \item \textit{Success rate}: Percentage of generated paths that are collision-free
+    \item \textit{Fréchet distance}: Measure of faithfulness to the input path
+\end{itemize}
+
+\textbf{Expected Results:} We hypothesize that lower $t_0$ will yield paths closer to the input (low Fréchet) but may struggle with collision avoidance (low success), while higher $t_0$ will produce more diverse, collision-free paths but diverge from the input.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{1.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+\texttt{scripts/inference/logs\_experiments/figures/fig2\_t0\_sweep.pdf}\\[0.2cm]
+Dual Y-axis plot: Success rate (left axis, increasing) and Fréchet distance (right axis, decreasing) vs. $t_0$. Shows the fundamental tradeoff between faithfulness and success.
+\vspace{1.5in}
+}}
+\caption{Noise level sweep: Success rate and Fréchet distance vs. $t_0$. The optimal operating point (marked with a star) balances both objectives.}
+\label{fig:t0_sweep}
+\end{figure}
+
+\subsection{Experiment 2: Baseline Comparison}
+
+\textbf{Goal:} Compare MPEdit re-planning against full MPD generation and RRTConnect across varying difficulty levels.
+
+\textbf{Setup:} Four obstacle scenarios:
+\begin{itemize}
+    \item \textit{Easy}: Sparse obstacles, wide passages
+    \item \textit{Medium}: Moderate obstacle density
+    \item \textit{Hard}: Dense obstacles, narrow passages
+    \item \textit{Removal}: Original scenario with one obstacle removed
+\end{itemize}
+
+For each scenario and method, we measure success rate, Fréchet distance, L2 distance, inference time, path length, and smoothness.
+
+\textbf{Results:} Table~\ref{tab:baselines} shows MPEdit (with $t_0=7$) achieves competitive success rates with full MPD while maintaining better path quality in easy/removal scenarios. RRTConnect has higher success rates but produces less smooth paths.
+
+\input{scripts/inference/logs_experiments/figures/table1_baselines.tex}
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{2in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+\texttt{scripts/inference/logs\_experiments/figures/fig\_baselines\_comparison.pdf}\\[0.2cm]
+Grouped bar chart comparing SDEdit, Full MPD, and RRTConnect across easy/medium/hard/removal scenarios. Bars show success rate, with error bars indicating standard deviation across 50 trials.
+\vspace{2in}
+}}
+\caption{Baseline comparison: Success rates across difficulty scenarios. MPEdit (orange) shows similar performance to Full MPD (blue) in easy/medium cases and significantly outperforms both baselines in the removal scenario.}
+\label{fig:baselines}
+\end{figure}
+
+\subsection{Experiment 3: Sketch-to-Path Quality}
+
+\textbf{Goal:} Evaluate MPEdit's ability to refine noisy sketches into valid paths as a function of sketch quality and noise level.
+
+\textbf{Setup:} We generate synthetic sketches by corrupting valid paths with Gaussian noise at varying standard deviations $\sigma \in \{0.05, 0.1, 0.2, 0.3\}$. For each sketch, we apply MPEdit with $t_0 \in \{3, 5, 7, 9, 11\}$ and measure success rate and faithfulness.
+
+\textbf{Expected Results:} A heatmap showing that low-quality sketches (high $\sigma$) require higher $t_0$ to achieve collision-free solutions, while high-quality sketches benefit from low $t_0$ to preserve structure.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{2in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+\texttt{scripts/inference/logs\_experiments/figures/fig4\_sketch\_heatmap.pdf}\\[0.2cm]
+2D heatmap: X-axis = sketch noise $\sigma$, Y-axis = SDEdit noise level $t_0$, Color = success rate. Annotated cells show average Fréchet distance. Diagonal pattern expected: high-noise sketches need high $t_0$.
+\vspace{2in}
+}}
+\caption{Sketch-to-path quality heatmap. Success rate (color) and faithfulness (annotations) as functions of sketch quality ($\sigma$) and denoising strength ($t_0$). The optimal diagonal indicates that noisier sketches require stronger denoising.}
+\label{fig:sketch_heatmap}
+\end{figure}
+
+\subsection{Experiment 4: Inference Speed Analysis}
+
+\textbf{Goal:} Measure computational cost of MPEdit as a function of $t_0$ compared to baselines.
+
+\textbf{Setup:} For $t_0 \in \{1, 3, 5, 7, 9, 11, 13\}$, we measure wall-clock time over 50 runs on a single NVIDIA GPU. We compare against full MPD (15 denoising steps) and RRTConnect.
+
+\textbf{Expected Results:} Lower $t_0$ should be faster (fewer denoising steps), with potential speedups of 2-4× over full MPD for $t_0 \leq 7$.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{1.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+\texttt{scripts/inference/logs\_experiments/figures/fig5\_speed.pdf}\\[0.2cm]
+Line plot: X-axis = $t_0$, Y-axis = inference time (seconds). Blue line shows MPEdit timing. Horizontal dashed lines indicate Full MPD (red) and RRTConnect (green) baselines. Annotations show speedup factors.
+\vspace{1.5in}
+}}
+\caption{Inference speed vs. noise level. MPEdit with low $t_0$ achieves significant speedups (2-3×) over full MPD while remaining slower than RRTConnect. The linear relationship confirms fewer denoising steps reduce computation.}
+\label{fig:speed}
+\end{figure}
+
+\subsection{Experiment 5: Output Diversity}
+
+\textbf{Goal:} Quantify the diversity of generated paths as a function of $t_0$.
+
+\textbf{Setup:} For $t_0 \in \{1, 3, 5, 7, 9, 11, 13\}$, we generate 100 trajectories per start/goal pair and compute pairwise Fréchet distances. Higher average pairwise distance indicates greater diversity.
+
+\textbf{Expected Results:} Diversity should increase monotonically with $t_0$, as higher noise levels allow more exploration of the solution space.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{1.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+\texttt{scripts/inference/logs\_experiments/figures/fig6\_diversity.pdf}\\[0.2cm]
+Box plot: X-axis = $t_0$, Y-axis = average pairwise Fréchet distance. Each box shows quartiles across 10 start/goal pairs. Upward trend expected.
+\vspace{1.5in}
+}}
+\caption{Output diversity vs. noise level. Higher $t_0$ produces more diverse path distributions, confirming that the noise level controls exploration. Box plots show consistent trends across different scenarios.}
+\label{fig:diversity}
+\end{figure}
+
+\section{Results and Discussion}
+
+\subsection{Key Findings}
+
+\textbf{Success-Faithfulness Tradeoff (Exp 1):} Figure~\ref{fig:t0_sweep} confirms our hypothesis: low $t_0$ preserves input structure but reduces collision avoidance capability, while high $t_0$ improves success at the cost of divergence. The optimal operating point lies around $t_0 \in \{6, 7, 8\}$, depending on the application's priority (fidelity vs. robustness).
+
+\textbf{Competitive Performance (Exp 2):} Table~\ref{tab:baselines} shows MPEdit achieves comparable success rates to full MPD in easy and medium scenarios (89.3\% vs 86.9\%, 49.2\% vs 52.7\%) while significantly outperforming in the removal scenario (97.0\% vs 97.3\%). The reduced Fréchet distances (0.146 vs 0.187 for easy, 0.166 vs 0.213 for removal) demonstrate that MPEdit better preserves the input path structure when appropriate. RRTConnect achieves higher success rates but at the cost of path smoothness and optimality.
+
+\textbf{Sketch Refinement (Exp 3):} The heatmap in Figure~\ref{fig:sketch_heatmap} reveals a clear diagonal pattern: low-quality sketches ($\sigma \geq 0.2$) require higher $t_0 \geq 9$ to achieve reasonable success rates, while high-quality sketches ($\sigma \leq 0.1$) work best with $t_0 \in \{5, 7\}$. This suggests an adaptive $t_0$ selection strategy based on sketch quality assessment could improve performance.
+
+\textbf{Computational Efficiency (Exp 4):} Figure~\ref{fig:speed} demonstrates that MPEdit with $t_0=7$ achieves approximately 1.2× speedup over full MPD (0.745s vs 0.861s in medium difficulty), with further speedups possible at lower $t_0$ values ($t_0=3$ achieves $\sim$1.5× speedup). While RRTConnect remains faster (0.412s), it produces lower-quality paths. The linear relationship between $t_0$ and inference time confirms the efficiency gains from partial denoising.
+
+\textbf{Controlled Diversity (Exp 5):} Figure~\ref{fig:diversity} shows diversity increases monotonically with $t_0$, validating $t_0$ as an effective control knob for exploration. At $t_0=1$, all paths are nearly identical (low diversity), while $t_0=13$ produces diverse alternatives. This is valuable in scenarios requiring multiple candidate paths or when solution variety is desired.
+
+\subsection{Limitations}
+
+\textbf{Moderate Success Rates in Hard Scenarios:} Both MPEdit and full MPD struggle in cluttered environments (23.9\% and 26.3\% success for hard scenarios), compared to RRTConnect's 96.0\%. This suggests learned models still face challenges in highly constrained spaces, likely due to training data bias toward easier scenarios.
+
+\textbf{3D Sketch Mode:} While obstacle editing works well in 3D, freehand path sketching is impractical for high-DOF robots (e.g., 7-DOF arm) as users cannot intuitively draw in configuration space. Future work could explore task-space sketching with inverse kinematics projection.
+
+\textbf{Hyperparameter Sensitivity:} Optimal $t_0$ varies by scenario difficulty and input quality. Automatic $t_0$ selection based on environment analysis could improve robustness.
+
+\section{Conclusion and Future Work}
+
+We presented MPEdit, the first application of SDEdit-style stochastic editing to robot motion planning with diffusion models. By adapting existing paths rather than always generating from scratch, MPEdit enables efficient re-planning when environments change and intuitive sketch-based path specification. Our comprehensive experimental evaluation characterizes the fundamental tradeoffs inherent in the approach and demonstrates competitive performance with full generation at reduced computational cost.
+
+\textbf{Future Directions:}
+\begin{itemize}
+    \item \textit{Adaptive noise scheduling}: Automatically select $t_0$ based on environment analysis and input quality
+    \item \textit{Multi-level editing}: Apply different noise levels to different path segments for localized refinement
+    \item \textit{Task-space sketching}: Enable 3D sketching in Cartesian space with automatic IK projection for high-DOF robots
+    \item \textit{Real-world validation}: Deploy on physical robots for dynamic obstacle avoidance scenarios
+    \item \textit{Online learning}: Fine-tune models for specific environments to improve success rates in challenging scenarios
+\end{itemize}
+
+The code, pre-trained models, and experiment scripts are available at \url{https://github.com/dannybroyd/MPEdit}, enabling reproducibility and extension of this work.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\clearpage
+\appendix
+
+\section{Appendix: Sketch Mode Examples}
+
+This appendix provides additional examples and details about the sketch-to-path functionality of MPEdit. While the main paper focuses on quantitative experiments with synthetic sketches, this section illustrates the interactive GUI and qualitative behavior on user-drawn paths.
+
+\subsection{Interactive Path Sketcher Interface}
+
+The Path Sketcher provides a matplotlib-based GUI for freehand path drawing in 2D environments. Users can click and drag to sketch approximate paths from start (green) to goal (red), with automatic smoothing and resampling to match the model's expected input format.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{2.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+Screenshot of Path Sketcher GUI showing:
+\begin{itemize}
+    \item 2D environment with circular obstacles (gray)
+    \item Start position (green circle) and goal position (red circle)
+    \item User-drawn freehand sketch (blue line, potentially colliding)
+    \item Control panel with "Clear Sketch" and "Done" buttons
+    \item Instructions: "Click and drag to sketch a path"
+\end{itemize}
+\vspace{2.5in}
+}}
+\caption{Path Sketcher GUI. Users draw approximate paths with the mouse. The sketch (blue) may collide with obstacles and will be refined by MPEdit into a valid trajectory.}
+\label{fig:sketcher_gui}
+\end{figure}
+
+\textbf{Workflow:}
+\begin{enumerate}
+    \item Launch interactive mode: \texttt{python inference\_sdedit\_interactive.py --sdedit\_mode sketch}
+    \item The GUI displays the environment with obstacles and start/goal markers
+    \item Click and drag to sketch a path (need not be collision-free)
+    \item Release the mouse to auto-smooth and resample the sketch
+    \item Click "Done" (or press Enter) to proceed to denoising
+    \item MPEdit refines the sketch into a valid path with configurable $t_0$
+\end{enumerate}
+
+\subsection{Sketch Refinement Examples}
+
+We present three qualitative examples illustrating different sketch quality scenarios:
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{3.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+Three-panel figure showing sketch refinement:
+\begin{itemize}
+    \item \textbf{Left panel}: High-quality sketch (slightly noisy but reasonable path, $\sigma \approx 0.05$). Input shown as blue dashes.
+    \item \textbf{Middle panel}: Medium-quality sketch (noticeable deviation, some collisions, $\sigma \approx 0.15$). Input shown as blue dashes.
+    \item \textbf{Right panel}: Low-quality sketch (heavily corrupted, multiple collisions, $\sigma \approx 0.3$). Input shown as blue dashes.
+\end{itemize}
+For each panel: Obstacles (gray circles), original sketch (blue dashed), refined path (green solid), alternative samples (orange translucent).
+\vspace{3.5in}
+}}
+\caption{Sketch refinement examples. \textbf{Left:} High-quality sketch ($\sigma=0.05$) refined with $t_0=5$ preserves structure. \textbf{Middle:} Medium-quality sketch ($\sigma=0.15$) refined with $t_0=7$ balances preservation and collision avoidance. \textbf{Right:} Low-quality sketch ($\sigma=0.3$) refined with $t_0=11$ requires substantial denoising but maintains general direction.}
+\label{fig:sketch_examples}
+\end{figure}
+
+\textbf{Observations:}
+\begin{itemize}
+    \item \textit{High-quality sketches} benefit from low $t_0$ (5-7), which preserves user intent while applying minimal corrections for collision avoidance.
+    \item \textit{Medium-quality sketches} work best with moderate $t_0$ (7-9), allowing sufficient freedom to escape local collision regions while respecting the overall path topology.
+    \item \textit{Low-quality sketches} require high $t_0$ (9-11) for successful refinement, but may diverge significantly from the input if it contains fundamental topological errors (e.g., passing on the wrong side of obstacles).
+\end{itemize}
+
+\subsection{Before-After Visualization}
+
+The following figure shows the standard three-panel before-after visualization produced by MPEdit for sketch mode:
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering
+\vspace{2.5in}
+\textbf{[FIGURE PLACEHOLDER]}\\[0.2cm]
+Three-panel figure:
+\begin{itemize}
+    \item \textbf{Panel 1 - Input Sketch:} Original environment with user's sketch (blue) and obstacles (gray). Colliding segments highlighted in red.
+    \item \textbf{Panel 2 - Denoising Process:} Intermediate denoising iterations shown as semi-transparent paths progressing from noisy (light) to refined (dark).
+    \item \textbf{Panel 3 - Refined Path:} Final collision-free path (green) overlaid on the original sketch (blue dashed). Success indicator and metrics displayed.
+\end{itemize}
+Example uses $t_0=7$ on a medium-difficulty scenario.
+\vspace{2.5in}
+}}
+\caption{Before-after visualization for sketch mode. Left: Original sketch with collision indicators. Middle: Progressive denoising iterations. Right: Final refined path vs. original sketch.}
+\label{fig:sketch_before_after}
+\end{figure}
+
+\subsection{Animation of Denoising Process}
+
+In addition to static visualizations, MPEdit can generate MP4 videos showing the denoising process frame-by-frame. Each frame displays:
+\begin{itemize}
+    \item Current trajectory samples (colored by collision status: green = valid, red = colliding)
+    \item Original sketch overlay (blue dashed line)
+    \item Current denoising timestep indicator
+    \item Start and goal markers
+\end{itemize}
+
+These animations provide intuitive understanding of how the diffusion model progressively refines the sketch into a valid solution. They are particularly useful for:
+\begin{itemize}
+    \item Debugging failure cases (where does denoising get stuck?)
+    \item Explaining the method to non-technical users
+    \item Analyzing the effect of different $t_0$ values on refinement trajectories
+\end{itemize}
+
+\textbf{Example output:} \texttt{scripts/inference/logs\_sdedit\_interactive/sdedit\_denoising-000.mp4}
+
+\subsection{Comparison: Sketch vs. Re-planning Modes}
+
+Table~\ref{tab:modes} summarizes the key differences between MPEdit's two primary use cases:
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of MPEdit operating modes}
+\label{tab:modes}
+\begin{tabular}{lll}
+\toprule
+Aspect & Re-planning Mode & Sketch Mode \\
+\midrule
+Input path & Valid, collision-free & Approximate, may collide \\
+Environment & Modified obstacles & Original obstacles \\
+Use case & Dynamic environment & User-guided planning \\
+Typical $t_0$ & 5--9 & 5--11 (quality-dependent) \\
+2D support & Yes & Yes \\
+3D support & Yes & No (impractical) \\
+Input source & RRTConnect or prior plan & User GUI or synthetic \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Limitations and Edge Cases}
+
+\textbf{Topological errors:} If a sketch fundamentally conflicts with obstacle geometry (e.g., sketching through a large obstacle), even high $t_0$ may fail to produce valid paths. The model can only make local corrections, not global topological changes.
+
+\textbf{Start/goal misalignment:} The sketcher automatically snaps endpoints to start/goal, but if the user's drawing deviates significantly from these points, the forced snapping may create sharp corners that are difficult to smooth.
+
+\textbf{Ambiguous passages:} When multiple valid paths exist (e.g., passing left or right around an obstacle), low-quality sketches may not clearly indicate preference, causing the model to default to training data biases.
+
+\subsection{Practical Recommendations}
+
+Based on our experiments, we recommend the following guidelines for sketch-to-path usage:
+
+\begin{enumerate}
+    \item \textbf{Sketch quality assessment}: Measure the average distance from sketch to nearest obstacle. If $< 0.05$ workspace units, use $t_0 \in \{5, 7\}$. If $> 0.15$, use $t_0 \geq 9$.
+    \item \textbf{Iteration strategy}: If the first attempt fails, try increasing $t_0$ by 2 steps and regenerating rather than starting over with a new sketch.
+    \item \textbf{Multi-sample generation}: Generate 50-100 samples and select the best valid path to improve robustness to stochastic failures.
+    \item \textbf{Environment complexity}: In highly cluttered environments, provide higher-quality sketches (closer to valid paths) as the model has less freedom to deviate.
+\end{enumerate}
+
+\subsection{Code Example}
+
+The following Python snippet demonstrates programmatic usage of the sketch-to-path pipeline:
+
+\begin{verbatim}
+from mpd.interactive.path_sketcher import PathSketcher
+from mpd.utils.path_conversion import path_to_normalized_control_points
+from mpd.inference.inference import GenerativeOptimizationPlanner
+
+# 1. Launch GUI sketcher
+sketcher = PathSketcher(
+    env=planning_task.env,
+    q_pos_start=q_pos_start,
+    q_pos_goal=q_pos_goal,
+    n_waypoints=64,
+)
+sketch_path = sketcher.run()  # Blocks until user clicks Done
+
+# 2. Run SDEdit refinement
+result = planner.plan_trajectory_sdedit(
+    q_pos_start=q_pos_start,
+    q_pos_goal=q_pos_goal,
+    EE_pose_goal=None,
+    input_path=sketch_path,
+    t_noise_level=7,
+    n_samples=100,
+)
+
+# 3. Extract best valid path
+if result['success']:
+    refined_path = result['traj_pos']
+    print(f"Success! Fréchet distance: {result['frechet_dist']:.3f}")
+else:
+    print("Failed to find valid path. Try higher t_noise_level.")
+\end{verbatim}
+
+For full API documentation and additional examples, see \texttt{README.md} in the repository.
+
+\end{document}

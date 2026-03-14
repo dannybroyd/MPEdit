@@ -213,3 +213,22 @@ scripts/plots/panda_front_page_thesis/plots/
 scripts/plots/planar_4_link/plots*
 /scripts/inference/logs_sdedit
 /scripts/inference/logs_sdedit_interactive
+
+# LaTeX compilation artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.out
+*.nav
+*.snm
+*.vrb
+report.log
+
+# Keep the final PDF in version control for easy access
+# report.pdf
