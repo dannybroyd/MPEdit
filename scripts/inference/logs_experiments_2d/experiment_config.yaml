@@ -1,4 +1,4 @@
-base_inference_config: ./cfgs/config_EnvSpheres3D-RobotPanda_sdedit.yaml
+base_inference_config: ./cfgs/config_EnvSimple2D-RobotPointMass2D_sdedit.yaml
 common:
   device: cuda:0
   n_start_goal_pairs: 50
@@ -35,7 +35,20 @@ exp2_baselines:
   - removal
   sdedit_noise_level: 11
 exp3_sketch:
-  enabled: false
+  enabled: true
+  n_sketches_per_sigma: 1
+  noise_levels:
+  - 3
+  - 5
+  - 7
+  - 9
+  - 11
+  noise_sigmas:
+  - 0.05
+  - 0.1
+  - 0.2
+  - 0.3
+  results_subdir: exp3_sketch
 exp4_speed:
   enabled: true
   n_timing_runs: 50
@@ -65,5 +78,5 @@ exp5_diversity:
   - 13
   obstacle_difficulty: medium
   results_subdir: exp5_diversity
-results_dir: logs_experiments_3d
+results_dir: logs_experiments_2d
 seed: 42

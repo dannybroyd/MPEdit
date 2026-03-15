@@ -31,7 +31,7 @@ def plot_sdedit_before_after(
     best_regen_path=None,
     all_regen_paths=None,
     obstacle_modification=None,
-    title="SDEdit Re-planning",
+    title="MPEdit Re-planning",
     figsize=(24, 8),
     save_path=None,
     sdedit_mode="replan",
@@ -126,7 +126,7 @@ def plot_sdedit_before_after(
         ax_after.set_title("After (obstacle map + sketch + regenerated paths)", fontsize=13)
         ref_label = "Sketch"
     else:
-        ax_after.set_title("After SDEdit (regenerated paths)", fontsize=13)
+        ax_after.set_title("After MPEdit (regenerated paths)", fontsize=13)
         ref_label = "Old Path"
     _render_env_on_ax(ax_after, env_after, dim, draw_extra=True)
     _draw_path(ax_after, input_np, robot=robot, env=env_after, tensor_args=ta,
@@ -134,18 +134,46 @@ def plot_sdedit_before_after(
                label=ref_label, zorder=4)
 
     if all_regen_paths is not None:
-        regen_np = to_numpy(all_regen_paths) if torch.is_tensor(all_regen_paths) else np.asarray(all_regen_paths)
-        if _needs_fk(regen_np, env_after) and _is_3d_ax(ax_after):
-            regen_ts = _batch_paths_to_taskspace(regen_np, robot, ta)
-        else:
-            regen_ts = regen_np
-        for i in range(min(regen_ts.shape[0], 60)):
-            if _is_3d_ax(ax_after) and regen_ts.shape[-1] >= 3:
-                ax_after.plot(regen_ts[i, :, 0], regen_ts[i, :, 1], regen_ts[i, :, 2],
-                              color="orange", alpha=0.15, linewidth=1.0, zorder=3)
+        def _plot_regen_batch(batch_paths, color, alpha, max_paths=60):
+            if batch_paths is None:
+                return
+            batch_np = to_numpy(batch_paths) if torch.is_tensor(batch_paths) else np.asarray(batch_paths)
+            if batch_np.ndim == 2:
+                batch_np = batch_np[None, ...]
+            if _needs_fk(batch_np, env_after) and _is_3d_ax(ax_after):
+                batch_ts = _batch_paths_to_taskspace(batch_np, robot, ta)
             else:
-                ax_after.plot(regen_ts[i, :, 0], regen_ts[i, :, 1],
-                              color="orange", alpha=0.15, linewidth=1.0, zorder=3)
+                batch_ts = batch_np
+            for i in range(min(batch_ts.shape[0], max_paths)):
+                if _is_3d_ax(ax_after) and batch_ts.shape[-1] >= 3:
+                    ax_after.plot(batch_ts[i, :, 0], batch_ts[i, :, 1], batch_ts[i, :, 2],
+                                  color=color, alpha=alpha, linewidth=1.0, zorder=3)
+                else:
+                    ax_after.plot(batch_ts[i, :, 0], batch_ts[i, :, 1],
+                                  color=color, alpha=alpha, linewidth=1.0, zorder=3)
+
+        regen_torch = all_regen_paths
+        if not torch.is_tensor(regen_torch):
+            try:
+                regen_torch = torch.as_tensor(
+                    np.asarray(all_regen_paths),
+                    dtype=ta.get("dtype", torch.float32),
+                    device=ta.get("device", "cpu"),
+                )
+            except Exception:
+                regen_torch = torch.as_tensor(
+                    np.asarray(all_regen_paths),
+                    dtype=torch.float32,
+                    device="cpu",
+                )
+        try:
+            trajs_unvalid, trajs_valid = planning_task.get_trajs_unvalid_and_valid(regen_torch)
+        except Exception:
+            trajs_unvalid, trajs_valid = None, regen_torch
+
+        # Invalid trajectories: black. Valid trajectories: orange.
+        _plot_regen_batch(trajs_unvalid, color="black", alpha=0.22)
+        _plot_regen_batch(trajs_valid, color="orange", alpha=0.15)
 
     if best_regen_path is not None:
         best_np = to_numpy(best_regen_path) if torch.is_tensor(best_regen_path) else np.asarray(best_regen_path)
@@ -177,6 +205,8 @@ def animate_sdedit_denoising(
     video_filepath="sdedit_denoising.mp4",
     n_frames=None,
     anim_time=5.0,
+    step_frame_repeats=1,
+    final_hold_frames=0,
     make_gif=False,
     gif_filepath=None,
 ):
@@ -196,6 +226,8 @@ def animate_sdedit_denoising(
         video_filepath: output .mp4 path
         n_frames: number of frames in the video (defaults to S)
         anim_time: video duration in seconds
+        step_frame_repeats: repeats each denoising step frame to slow playback
+        final_hold_frames: number of extra frames to hold on the final denoised step
         make_gif: if True, also saves a .gif animation
         gif_filepath: optional output .gif path (defaults to video path with .gif extension)
     """
@@ -212,6 +244,13 @@ def animate_sdedit_denoising(
         n_frames = max(2, S)
 
     idxs = np.round(np.linspace(0, S - 1, n_frames)).astype(int)
+    step_frame_repeats = max(1, int(step_frame_repeats))
+    if step_frame_repeats > 1:
+        idxs = np.repeat(idxs, step_frame_repeats)
+    final_hold_frames = max(0, int(final_hold_frames))
+    if final_hold_frames > 0:
+        idxs = np.concatenate([idxs, np.full(final_hold_frames, S - 1, dtype=int)])
+    n_frames_effective = len(idxs)
     trajs_selection = trajs_pos_iters[idxs]  # (n_frames, B, H, D)
 
     input_np = to_numpy(input_path) if torch.is_tensor(input_path) else np.asarray(input_path)
@@ -232,7 +271,7 @@ def animate_sdedit_denoising(
 
     def animate_fn(i, ax):
         ax.clear()
-        ax.set_title(f"SDEdit denoising — iter {idxs[i]}/{S-1}")
+        ax.set_title(f"MPEdit denoising — iter {idxs[i]}/{S-1}")
 
         env.render(ax)
 
@@ -269,8 +308,8 @@ def animate_sdedit_denoising(
                     ax.plot(traj_ts[:, 0], traj_ts[:, 1], color="orange",
                             linewidth=1.2, alpha=0.6, zorder=5)
 
-        # Best trajectory on the last frame
-        if traj_pos_best is not None and i == n_frames - 1:
+        # Best trajectory on the final denoised step (including hold frames).
+        if traj_pos_best is not None and idxs[i] == (S - 1):
             best_np = to_numpy(traj_pos_best)
             _draw_path(ax, best_np, robot=robot, env=env, tensor_args=ta,
                        color="green", linewidth=2.5, zorder=10, label="Best")
@@ -281,7 +320,7 @@ def animate_sdedit_denoising(
         ax.legend(loc="upper left", fontsize=8)
 
     create_animation_video(
-        fig, animate_fn, n_frames=n_frames, fargs=(ax,),
+        fig, animate_fn, n_frames=n_frames_effective, fargs=(ax,),
         anim_time=anim_time,
         video_filepath=video_filepath,
         make_gif=make_gif,
@@ -301,7 +340,7 @@ def plot_sdedit_results(
     input_path,
     regenerated_paths,
     best_path=None,
-    title="SDEdit Path Regeneration",
+    title="MPEdit Path Regeneration",
     obstacle_modification=None,
     figsize=(10, 10),
     save_path=None,
@@ -426,7 +465,7 @@ def plot_noise_level_comparison(
             ax.grid(True, alpha=0.3)
 
     axes[0].legend(loc='upper left', fontsize=9)
-    plt.suptitle('SDEdit: Noise Level Comparison', fontsize=14)
+    plt.suptitle('MPEdit: Noise Level Comparison', fontsize=14)
     plt.tight_layout()
 
     if save_path is not None:

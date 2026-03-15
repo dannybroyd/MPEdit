@@ -159,7 +159,7 @@ def generate_baseline_table(results_dir, save_dir):
 
     scenarios = sorted(all_results.keys())
     methods = ["sdedit", "full_mpd", "rrt"]
-    method_labels = {"sdedit": "SDEdit", "full_mpd": "Full MPD", "rrt": "RRTConnect"}
+    method_labels = {"sdedit": "MPEdit", "full_mpd": "Full MPD", "rrt": "RRTConnect"}
     metrics_keys = [
         ("success_rate", "S%", "{:.1%}"),
         ("frechet_to_input_mean", "Fréchet↓", "{:.3f}"),
@@ -262,7 +262,7 @@ def _plot_baseline_bar_chart(all_results, scenarios, methods, method_labels, sav
         ax.legend()
         ax.grid(True, alpha=0.2, axis="y")
 
-    fig.suptitle("Re-planning: SDEdit vs Baselines", fontsize=15, y=1.02)
+    fig.suptitle("Re-planning: MPEdit vs Baselines", fontsize=15, y=1.02)
     fig.tight_layout()
     save_path = os.path.join(save_dir, "fig_baselines_comparison.pdf")
     fig.savefig(save_path, bbox_inches="tight")
@@ -366,7 +366,7 @@ def plot_speed(results_dir, save_dir):
     ax.errorbar(
         noise_levels, sdedit_means, yerr=sdedit_stds,
         color="#4CAF50", marker="o", linewidth=2.5, markersize=8,
-        capsize=4, label="SDEdit", zorder=5,
+        capsize=4, label="MPEdit", zorder=5,
     )
 
     if timing.get("full_mpd"):
@@ -391,7 +391,7 @@ def plot_speed(results_dir, save_dir):
 
     ax.set_xlabel("Noise Level $t_0$ (DDIM step index)")
     ax.set_ylabel("Inference Time (seconds)")
-    ax.set_title("Inference Speed: SDEdit vs Baselines")
+    ax.set_title("Inference Speed: MPEdit vs Baselines")
     ax.set_xticks(noise_levels)
     ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3)

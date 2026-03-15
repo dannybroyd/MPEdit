@@ -8,6 +8,11 @@ Main use cases:
 - **Replan**: update an existing path after obstacle changes.
 - **Sketch**: turn a rough 2D sketch into a collision-free path.
 
+<div style="display: flex; text-align:center; justify-content: center">
+    <img src="figures/MPEdit-Sketch.gif" alt="Image 1" width="400" style="display: inline-block;">
+    <img src="figures/MPEdit-Replan.gif" alt="Image 2" width="400" style="display: inline-block;">
+</div>
+
 
 ## Installation Guide
 
@@ -79,8 +84,9 @@ python inference_sdedit_interactive.py --sdedit_mode sketch
 Notes:
 - Default 2D `t_noise_level` is `11` (from config).
 - Sketch mode randomizes start/goal by default.
-- Sketch mode randomly selects from similar circle-style 2D maps by default:
-  `EnvSimple2D`, `EnvGridCircles2D`, `EnvCircle2D`.
+- Sketch mode randomly selects from trained 2D maps by default:
+  `EnvSimple2D`, `EnvDense2D`, `EnvNarrowPassageDense2D`, `EnvEmpty2D`.
+- To force a specific map: `--env_id_override EnvDense2D`.
 
 
 ### 2) Replan (2D, interactive)
@@ -127,11 +133,12 @@ python inference_sdedit.py --sdedit_mode sketch --t_noise_levels "11"
 | `--cfg_inference_path` | `./cfgs/config_EnvSimple2D-RobotPointMass2D_sdedit.yaml` | Inference YAML path |
 | `--sdedit_mode` | `replan` | `replan` or `sketch` |
 | `--t_noise_level` | `-1` | `<0` uses config default (`sdedit.t_noise_level`) |
+| `--env_id_override` | `""` | Force a specific env map (e.g., `EnvDense2D`) |
 | `--selection_start_goal` | `validation` | Start/goal source split |
 | `--n_start_goal_states` | `1` | Number of interactive cases |
 | `--randomize_start_goal` | `True` | Randomize start/goal sample selection |
 | `--randomize_sketch_env_map` | `True` | Randomize sketch map from candidate envs |
-| `--sketch_env_candidates` | `EnvSimple2D,EnvGridCircles2D,EnvCircle2D` | Candidate sketch maps |
+| `--sketch_env_candidates` | `EnvSimple2D,EnvDense2D,EnvNarrowPassageDense2D,EnvEmpty2D` | Candidate 2D trained maps |
 | `--randomize_base_obstacle_map` | `False` | Add random extra obstacles (optional) |
 | `--random_base_obstacles_count` | `3` | Number of random extra obstacles |
 | `--random_base_radius_min_fraction` | `0.04` | Min radius fraction of workspace scale |
@@ -139,7 +146,7 @@ python inference_sdedit.py --sdedit_mode sketch --t_noise_levels "11"
 | `--random_base_map_max_attempts` | `10` | Retry budget for valid random maps |
 | `--render_before_after` | `True` | Save summary figure |
 | `--render_denoising_video` | `True` | Save denoising MP4 |
-| `--render_denoising_gif` | `False` | Save denoising GIF |
+| `--render_denoising_gif` | `True` | Save denoising GIF (~2s per denoising step + final hold) |
 | `--render_env_robot_opt_iters` | `False` | Save robot optimization animation |
 | `--render_env_robot_opt_iters_gif` | `False` | Save robot optimization GIF |
 | `--device` | `cuda:0` | Torch device |
@@ -158,7 +165,7 @@ python inference_sdedit.py --sdedit_mode sketch --t_noise_levels "11"
 | `--n_start_goal_states` | `3` | Number of evaluated pairs |
 | `--render_before_after` | `True` | Save summary figure |
 | `--render_denoising_video` | `True` | Save denoising MP4 |
-| `--render_denoising_gif` | `False` | Save denoising GIF |
+| `--render_denoising_gif` | `False` | Save denoising GIF (~2s per denoising step + final hold) |
 | `--render_joint_space_time_iters` | `False` | Render joint-time iteration animation |
 | `--render_joint_space_env_iters` | `False` | Render joint-env iteration animation |
 | `--render_env_robot_opt_iters` | `True` | Render robot optimization animation |
@@ -260,3 +267,6 @@ MPEdit/
 ├── data_trajectories  -> data_public/data_trajectories
 └── deps/                           # submodules/dependencies
 ```
+
+## Credit
+This code relies heavily on the original imlementation of MPD, please check it out at: https://github.com/joaoamcarvalho/mpd-splines-public.git

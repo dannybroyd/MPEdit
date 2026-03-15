@@ -80,7 +80,7 @@ ddpm:
 
 # SDEdit-specific options
 sdedit:
-  t_noise_level: 7
+  t_noise_level: 11
   mode: 'replan'
 
   # Obstacle modification (for replan mode)

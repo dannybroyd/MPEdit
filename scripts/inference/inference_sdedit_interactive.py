@@ -13,6 +13,9 @@ Usage:
   # 2D Interactive sketching (draw a path, then denoise it)
   python inference_sdedit_interactive.py --sdedit_mode sketch
 
+  # 2D Interactive on a specific trained map variant
+  python inference_sdedit_interactive.py --sdedit_mode sketch --env_id_override EnvDense2D
+
   # 2D Interactive with randomized base map + randomized start/goal
   python inference_sdedit_interactive.py \
     --sdedit_mode sketch \
@@ -154,6 +157,11 @@ def _select_random_sketch_env_id(rng, candidate_env_ids):
     return str(rng.choice(np.asarray(available, dtype=object)))
 
 
+DEFAULT_2D_TRAINED_ENV_CANDIDATES = (
+    "EnvSimple2D,EnvDense2D,EnvNarrowPassageDense2D,EnvEmpty2D"
+)
+
+
 @single_experiment_yaml
 def experiment(
     ########################################################################
@@ -172,13 +180,14 @@ def experiment(
     random_base_radius_min_fraction: float = 0.04,
     random_base_radius_max_fraction: float = 0.10,
     random_base_map_max_attempts: int = 10,
+    env_id_override: str = "",
     randomize_sketch_env_map: bool = True,
-    sketch_env_candidates: str = "EnvSimple2D,EnvGridCircles2D,EnvCircle2D",
+    sketch_env_candidates: str = DEFAULT_2D_TRAINED_ENV_CANDIDATES,
     ########################################################################
     # Visualization
     render_before_after: bool = True,
     render_denoising_video: bool = True,
-    render_denoising_gif: bool = False,
+    render_denoising_gif: bool = True,
     render_env_robot_opt_iters: bool = False,
     render_env_robot_opt_iters_gif: bool = False,
     ########################################################################
@@ -220,7 +229,19 @@ def experiment(
     args_train = DotMap(load_params_from_yaml(os.path.join(args_inference.model_dir, "args.yaml")))
     dataset_subdir = str(args_train.get("dataset_subdir", ""))
     is_pointmass_2d_model = "RobotPointMass2D" in dataset_subdir
-    if sdedit_mode == "sketch" and randomize_sketch_env_map and is_pointmass_2d_model:
+    requested_env_id = str(env_id_override).strip()
+    if requested_env_id:
+        if not hasattr(tr_environments, requested_env_id):
+            available_env_ids = sorted(
+                name for name in dir(tr_environments) if name.startswith("Env")
+            )
+            raise ValueError(
+                f"Unknown env_id_override='{requested_env_id}'. "
+                f"Available env IDs include: {', '.join(available_env_ids)}"
+            )
+        args_inference.env_id_replace = requested_env_id
+        selected_sketch_env_id = requested_env_id
+    elif sdedit_mode == "sketch" and randomize_sketch_env_map and is_pointmass_2d_model:
         candidate_env_ids = [x.strip() for x in sketch_env_candidates.split(",") if x.strip()]
         selected_sketch_env_id = _select_random_sketch_env_id(rng, candidate_env_ids)
         if selected_sketch_env_id is not None:
@@ -235,7 +256,7 @@ def experiment(
     print(f"Noise level: {t_noise_level}")
     print(f"Random start/goal: {randomize_start_goal}")
     if selected_sketch_env_id is not None:
-        print(f"Sketch env map: {selected_sketch_env_id}")
+        print(f"Selected env map: {selected_sketch_env_id}")
     print(f"Random base obstacle map: {randomize_base_obstacle_map}")
     print(f"{'='*80}")
 
@@ -532,6 +553,16 @@ def experiment(
 
         # Denoising video
         if render_denoising_video and results_single.q_trajs_pos_iters is not None:
+            denoising_step_repeats = 1
+            denoising_final_hold = 0
+            denoising_anim_time = 5.0
+            if render_denoising_gif:
+                denoising_step_repeats = 2
+                denoising_final_hold = 6
+                n_denoise_steps = int(results_single.q_trajs_pos_iters.shape[0])
+                denoising_anim_time = float(
+                    n_denoise_steps * denoising_step_repeats + denoising_final_hold
+                )
             animate_sdedit_denoising(
                 planning_task,
                 q_pos_start, q_pos_goal,
@@ -539,7 +570,9 @@ def experiment(
                 trajs_pos_iters=results_single.q_trajs_pos_iters,
                 traj_pos_best=results_single.q_trajs_pos_best,
                 video_filepath=os.path.join(results_dir, f"interactive_denoising-{idx_sg:03d}.mp4"),
-                anim_time=5.0,
+                anim_time=denoising_anim_time,
+                step_frame_repeats=denoising_step_repeats,
+                final_hold_frames=denoising_final_hold,
                 make_gif=render_denoising_gif,
             )
 

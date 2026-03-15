@@ -293,6 +293,16 @@ def experiment(
             # reload the default one if needed
             results_for_video = results_single
             if results_for_video.q_trajs_pos_iters is not None:
+                denoising_anim_time = args_inference.trajectory_duration
+                denoising_step_repeats = 1
+                denoising_final_hold = 0
+                if render_denoising_gif:
+                    denoising_step_repeats = 2
+                    denoising_final_hold = 6
+                    n_denoise_steps = int(results_for_video.q_trajs_pos_iters.shape[0])
+                    denoising_anim_time = float(
+                        n_denoise_steps * denoising_step_repeats + denoising_final_hold
+                    )
                 animate_sdedit_denoising(
                     planning_task,
                     q_pos_start, q_pos_goal,
@@ -300,7 +310,9 @@ def experiment(
                     trajs_pos_iters=results_for_video.q_trajs_pos_iters,
                     traj_pos_best=results_for_video.q_trajs_pos_best,
                     video_filepath=os.path.join(results_dir, f"sdedit_denoising-{idx_sg:03d}.mp4"),
-                    anim_time=args_inference.trajectory_duration,
+                    anim_time=denoising_anim_time,
+                    step_frame_repeats=denoising_step_repeats,
+                    final_hold_frames=denoising_final_hold,
                     make_gif=render_denoising_gif,
                 )
 

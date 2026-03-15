@@ -35,7 +35,7 @@ exp1_t0_sweep:
 # ─────────────────────────────────────────────────────────────────────────────
 exp2_baselines:
   enabled: true
-  sdedit_noise_level: 7
+  sdedit_noise_level: 11
   full_mpd_noise_level: 0
   scenarios: ['easy', 'medium', 'hard', 'removal']
   rrt_allowed_time: 10.0
