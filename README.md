@@ -16,6 +16,8 @@ Main use cases:
 
 ## Installation Guide
 
+The entire process takes a while - it took a little more than an hour on my machine.
+
 ### Prerequisites
 - Ubuntu 22.04+ (or compatible Linux)
 - Miniconda
